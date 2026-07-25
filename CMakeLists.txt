@@ -444,6 +444,11 @@ add_library(engine_runtime STATIC
     src/models/index_tts2/style_encoder.cpp
     src/models/index_tts2/tokenizer_text.cpp
     src/models/index_tts2/vocoder.cpp
+    src/models/inflect_tts/assets.cpp
+    src/models/inflect_tts/frontend.cpp
+    src/models/inflect_tts/runtime.cpp
+    src/models/inflect_tts/session.cpp
+    src/models/inflect_tts/loader.cpp
     src/models/nemotron_asr/assets.cpp
     src/models/nemotron_asr/frontend.cpp
     src/models/nemotron_asr/encoder.cpp

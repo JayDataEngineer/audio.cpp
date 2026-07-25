@@ -14,6 +14,7 @@
 #include "engine/models/higgs_audio_tts/loader.h"
 #include "engine/models/hviske_asr/loader.h"
 #include "engine/models/index_tts2/loader.h"
+#include "engine/models/inflect_tts/loader.h"
 #include "engine/models/irodori_tts/loader.h"
 #include "engine/models/marblenet_vad/session.h"
 #include "engine/models/miocodec/loader.h"
@@ -266,6 +267,7 @@ ModelRegistry make_default_registry(const std::optional<std::filesystem::path> &
         engine::models::qwen3_forced_aligner::make_qwen3_forced_aligner_loader(),
         engine::models::qwen3_asr::make_qwen3_asr_loader(),
         engine::models::index_tts2::make_index_tts2_loader(),
+        engine::models::inflect_tts::make_inflect_tts_loader(),
         engine::models::qwen3_tts::make_qwen3_tts_loader(),
         engine::models::vietneu_tts::make_vietneu_tts_loader(),
         engine::models::sortformer_diar::make_sortformer_diar_loader(),

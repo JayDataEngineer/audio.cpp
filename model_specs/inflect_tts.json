@@ -1,0 +1,30 @@
+{
+  "family": "inflect_tts",
+  "sources": [
+    {
+      "format": "safetensors",
+      "roots": {
+        "model": "."
+      },
+      "files": {
+        "config": "model:config.json"
+      },
+      "tensors": {
+        "weights": "model:inflect-micro-v2.safetensors"
+      }
+    },
+    {
+      "format": "gguf",
+      "roots": {
+        "model": ".",
+        "weights": "$gguf"
+      },
+      "files": {
+        "config": "model:config.json"
+      },
+      "tensors": {
+        "weights": "weights:"
+      }
+    }
+  ]
+}
