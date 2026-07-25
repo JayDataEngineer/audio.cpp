@@ -155,7 +155,7 @@ class ModelPackage:
 
 
 UTILITY_CONVERTER_KINDS = {"pytorch_to_safetensors"}
-POSTPROCESS_SNAPSHOT_PACKAGE_IDS = {"voxcpm2"}
+POSTPROCESS_SNAPSHOT_PACKAGE_IDS = {"inflect_tts", "voxcpm2"}
 # HF repos that require accepting a license / access grant before download.
 _GATED_REPO_MARKERS = (
     "kyutai/pocket-tts",
@@ -408,6 +408,34 @@ CATALOG: tuple[ModelPackage, ...] = (
         family="fish_audio",
         tasks=("tts",),
         description="Standalone audio.cpp Q8_0 GGUF package for Fish Audio S2 Pro.",
+    ),
+    ModelPackage(
+        id="inflect_tts",
+        display_name="Inflect Micro v2",
+        target_directory="Inflect-Micro-v2",
+        source=SnapshotSource(
+            repo_id="owensong/Inflect-Micro-v2",
+            include_prefixes=(
+                "config.json",
+                "inference.py",
+                "inflect_nano_v2_frontend.py",
+                "inflect_vits_frontend.py",
+                "model.pth",
+                "runtime/",
+            ),
+        ),
+        required_files=(
+            "config.json",
+            "inference.py",
+            "inflect_nano_v2_frontend.py",
+            "inflect_vits_frontend.py",
+            "model.pth",
+            "runtime/inflect_alias_free.py",
+            "inflect-micro-v2.safetensors",
+        ),
+        description="Downloads Inflect Micro v2 and exports the folded inference weights used by audio.cpp.",
+        family="inflect_tts",
+        tasks=("tts",),
     ),
     ModelPackage(
         id="higgs_audio_stt",
@@ -1792,6 +1820,20 @@ def convert_moss_tts_weights(root: Path) -> None:
     write_checked_safetensors(tensors, output_path, input_path, overwrite=True)
 
 
+def convert_inflect_micro_v2_weights(root: Path) -> None:
+    subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "tools" / "convert_inflect_micro_v2.py"),
+            "--model-dir",
+            str(root),
+            "--output",
+            str(root / "inflect-micro-v2.safetensors"),
+        ],
+        check=True,
+    )
+
+
 def convert_ace_step_silence_latent(root: Path) -> None:
     input_path = root / "silence_latent.pt"
     output_path = root / "silence_latent.safetensors"
@@ -1855,9 +1897,16 @@ def install_snapshot(package: ModelPackage, source: SnapshotSource, models_root:
     staging_root.mkdir(parents=True, exist_ok=True)
     staging_dir = Path(tempfile.mkdtemp(prefix=f"{package.target_directory}.", dir=staging_root))
     try:
-        pre_validate_files = tuple(relative for relative in package.required_files if relative != "audiovae.safetensors")
+        generated_files = {
+            "inflect_tts": {"inflect-micro-v2.safetensors"},
+            "voxcpm2": {"audiovae.safetensors"},
+        }.get(package.id, set())
+        pre_validate_files = tuple(relative for relative in package.required_files if relative not in generated_files)
         install_snapshot_into_dir(source, staging_dir, pre_validate_files, validate=package.id != "voxcpm2")
-        if package.id == "voxcpm2":
+        if package.id == "inflect_tts":
+            convert_inflect_micro_v2_weights(staging_dir)
+            validate_required_files(package, staging_dir)
+        elif package.id == "voxcpm2":
             convert_voxcpm2_audiovae(staging_dir)
             validate_required_files(package, staging_dir)
         elif package.id == "moss_tts_nano_100m_model":

@@ -771,19 +771,11 @@ public:
           vocoder_runner_(execution_context_) {}
 
     runtime::AudioBuffer synthesize(const std::string & text, const InflectSynthesisOptions & options) {
+        auto chunk_audio = synthesize_chunk(text, options);
         runtime::AudioBuffer output;
         output.sample_rate = assets_->config.sample_rate;
         output.channels = 1;
-        const auto chunks = split_inflect_text_chunks(text, 280);
-        for (size_t chunk_index = 0; chunk_index < chunks.size(); ++chunk_index) {
-            auto chunk_audio = synthesize_chunk(
-                chunks[chunk_index],
-                InflectSynthesisOptions{options.speed, options.variation, options.seed == 0 ? 0 : options.seed + static_cast<uint32_t>(chunk_index)});
-            if (!output.samples.empty()) {
-                output.samples.insert(output.samples.end(), static_cast<size_t>(0.18 * output.sample_rate), 0.0f);
-            }
-            output.samples.insert(output.samples.end(), chunk_audio.begin(), chunk_audio.end());
-        }
+        output.samples = std::move(chunk_audio);
         return output;
     }
 

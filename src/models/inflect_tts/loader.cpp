@@ -32,6 +32,8 @@ runtime::ModelCliInterface cli(const InflectAssets &) {
     out.request_options = {
         {"speaking_rate", "float", "Speech speed multiplier; default 1.0."},
         {"variation", "float", "Latent noise scale; default 0.667."},
+        {"text_chunk_size", "n", "Long-form text chunk size; default 280."},
+        {"text_chunk_mode", "default|tag_aware|japanese|endline", "Framework text chunking mode."},
         {"seed", "n", "Sampling seed; omitted means random."},
     };
     out.session_options = {

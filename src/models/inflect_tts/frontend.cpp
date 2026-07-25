@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <cctype>
 #include <iterator>
-#include <sstream>
 #include <stdexcept>
 #include <unordered_map>
 
@@ -201,36 +200,6 @@ std::vector<int32_t> encode_inflect_text(const std::string & text) {
         throw std::runtime_error("Inflect TTS text produced no phoneme tokens");
     }
     return sequence;
-}
-
-std::vector<std::string> split_inflect_text_chunks(const std::string & text, size_t max_chars) {
-    std::vector<std::string> chunks;
-    std::string current;
-    std::istringstream words(text);
-    std::string word;
-    while (words >> word) {
-        const bool punctuation_break =
-            !word.empty() && (word.back() == '.' || word.back() == '!' || word.back() == '?' || word.back() == ';');
-        if (!current.empty() && current.size() + word.size() + 1 > max_chars) {
-            chunks.push_back(current);
-            current.clear();
-        }
-        if (!current.empty()) {
-            current.push_back(' ');
-        }
-        current += word;
-        if (punctuation_break && !current.empty()) {
-            chunks.push_back(current);
-            current.clear();
-        }
-    }
-    if (!current.empty()) {
-        chunks.push_back(current);
-    }
-    if (chunks.empty()) {
-        throw std::runtime_error("Inflect TTS requires non-empty text");
-    }
-    return chunks;
 }
 
 }  // namespace engine::models::inflect_tts
