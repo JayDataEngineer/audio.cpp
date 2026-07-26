@@ -41,6 +41,9 @@ std::shared_ptr<const InflectAssets> load_inflect_assets(const std::filesystem::
         model_path,
         engine::model_spec::default_spec_path("inflect_tts"));
     assets.config = parse_config(assets.resources);
+    assets.english_g2p = std::make_shared<engine::text::english_g2p::EnglishG2P>(
+        assets.resources.require_file("english_g2p_us_gold").parent_path(),
+        false);
     assets.weights = assets.resources.open_tensor_source("weights");
     validate_weight_anchors(assets);
     return std::make_shared<InflectAssets>(std::move(assets));

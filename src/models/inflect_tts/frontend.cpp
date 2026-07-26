@@ -1,9 +1,8 @@
 #include "engine/models/inflect_tts/frontend.h"
 
-#include "engine/framework/io/dynamic_library.h"
-
 #include <algorithm>
 #include <cctype>
+#include <functional>
 #include <iterator>
 #include <regex>
 #include <stdexcept>
@@ -66,6 +65,193 @@ void replace_all(std::string & text, const std::string & from, const std::string
     }
 }
 
+std::string lower_ascii(std::string text) {
+    std::transform(text.begin(), text.end(), text.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return text;
+}
+
+std::string regex_replace_fn(
+    const std::string & text,
+    const std::regex & pattern,
+    const std::function<std::string(const std::smatch &)> & fn) {
+    std::string out;
+    std::sregex_iterator it(text.begin(), text.end(), pattern);
+    std::sregex_iterator end;
+    size_t pos = 0;
+    for (; it != end; ++it) {
+        const auto & match = *it;
+        out.append(text, pos, static_cast<size_t>(match.position()) - pos);
+        out += fn(match);
+        pos = static_cast<size_t>(match.position() + match.length());
+    }
+    out.append(text, pos, std::string::npos);
+    return out;
+}
+
+std::string int_to_cardinal(int64_t value);
+
+std::string two_digit_cardinal(int value) {
+    static const char * below_20[] = {
+        "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+        "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen",
+        "eighteen", "nineteen"};
+    static const char * tens[] = {
+        "", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"};
+    if (value < 20) {
+        return below_20[value];
+    }
+    const int ten = value / 10;
+    const int one = value % 10;
+    return one == 0 ? std::string(tens[ten]) : std::string(tens[ten]) + " " + below_20[one];
+}
+
+std::string int_to_cardinal(int64_t value) {
+    if (value < 0) {
+        return "minus " + int_to_cardinal(-value);
+    }
+    if (value < 100) {
+        return two_digit_cardinal(static_cast<int>(value));
+    }
+    if (value < 1000) {
+        const int64_t hundreds = value / 100;
+        const int64_t rest = value % 100;
+        return rest == 0
+            ? int_to_cardinal(hundreds) + " hundred"
+            : int_to_cardinal(hundreds) + " hundred " + int_to_cardinal(rest);
+    }
+    const std::pair<int64_t, const char *> scales[] = {
+        {1000000000000000000LL, "quintillion"},
+        {1000000000000000LL, "quadrillion"},
+        {1000000000000LL, "trillion"},
+        {1000000000LL, "billion"},
+        {1000000LL, "million"},
+        {1000LL, "thousand"},
+    };
+    for (const auto & [scale, name] : scales) {
+        if (value >= scale) {
+            const int64_t head = value / scale;
+            const int64_t rest = value % scale;
+            return rest == 0
+                ? int_to_cardinal(head) + " " + name
+                : int_to_cardinal(head) + " " + name + " " + int_to_cardinal(rest);
+        }
+    }
+    return {};
+}
+
+std::string int_to_ordinal(int64_t value) {
+    static const std::unordered_map<std::string, std::string> replacements = {
+        {"one", "first"}, {"two", "second"}, {"three", "third"}, {"five", "fifth"},
+        {"eight", "eighth"}, {"nine", "ninth"}, {"twelve", "twelfth"},
+    };
+    const std::string cardinal = int_to_cardinal(value);
+    const size_t last_space = cardinal.find_last_of(' ');
+    const std::string prefix = last_space == std::string::npos ? std::string() : cardinal.substr(0, last_space + 1);
+    const std::string last = last_space == std::string::npos ? cardinal : cardinal.substr(last_space + 1);
+    if (const auto it = replacements.find(last); it != replacements.end()) {
+        return prefix + it->second;
+    }
+    if (!last.empty() && last.back() == 'y') {
+        return prefix + last.substr(0, last.size() - 1) + "ieth";
+    }
+    return cardinal + "th";
+}
+
+std::string strip_commas(std::string value) {
+    value.erase(std::remove(value.begin(), value.end(), ','), value.end());
+    return value;
+}
+
+std::string digit_words(const std::string & text) {
+    std::string out;
+    for (char ch : text) {
+        if (std::isdigit(static_cast<unsigned char>(ch)) == 0) {
+            continue;
+        }
+        if (!out.empty()) {
+            out.push_back(' ');
+        }
+        out += int_to_cardinal(ch - '0');
+    }
+    return out;
+}
+
+std::string identifier_digits(const std::string & text) {
+    std::string out;
+    for (size_t i = 0; i < text.size(); ++i) {
+        const char ch = text[i];
+        if (std::isdigit(static_cast<unsigned char>(ch)) == 0) {
+            continue;
+        }
+        if (!out.empty()) {
+            out.push_back(' ');
+        }
+        out += ch == '0' && i > 0 ? "oh" : int_to_cardinal(ch - '0');
+    }
+    return out;
+}
+
+const std::unordered_map<char, const char *> & letter_names() {
+    static const std::unordered_map<char, const char *> values = {
+        {'A', "ay"}, {'B', "bee"}, {'C', "see"}, {'D', "dee"}, {'E', "ee"}, {'F', "eff"},
+        {'G', "gee"}, {'H', "aitch"}, {'I', "eye"}, {'J', "jay"}, {'K', "kay"}, {'L', "ell"},
+        {'M', "em"}, {'N', "en"}, {'O', "oh"}, {'P', "pee"}, {'Q', "cue"}, {'R', "ar"},
+        {'S', "ess"}, {'T', "tee"}, {'U', "you"}, {'V', "vee"}, {'W', "double you"},
+        {'X', "ex"}, {'Y', "why"}, {'Z', "zee"},
+    };
+    return values;
+}
+
+std::string letter_name(char ch) {
+    const auto upper = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+    const auto it = letter_names().find(upper);
+    return it == letter_names().end() ? std::string(1, ch) : it->second;
+}
+
+std::string expand_identifier_token(const std::string & token) {
+    const std::regex pattern("([A-Za-z]?)(\\d+)([A-Za-z]?)");
+    std::smatch match;
+    if (!std::regex_match(token, match, pattern)) {
+        return token;
+    }
+    std::vector<std::string> pieces;
+    const std::string prefix = match[1].str();
+    const std::string digits = match[2].str();
+    const std::string suffix = match[3].str();
+    if (!prefix.empty()) {
+        pieces.push_back(letter_name(prefix[0]));
+    }
+    pieces.push_back(digits.size() == 3 || digits.front() == '0'
+        ? identifier_digits(digits)
+        : int_to_cardinal(std::stoll(digits)));
+    if (!suffix.empty()) {
+        pieces.push_back(letter_name(suffix[0]));
+    }
+    std::string out;
+    for (const auto & piece : pieces) {
+        if (!out.empty()) {
+            out.push_back(' ');
+        }
+        out += piece;
+    }
+    return out;
+}
+
+bool valid_date(int year, int month, int day) {
+    if (month < 1 || month > 12 || day < 1) {
+        return false;
+    }
+    const int days[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    int max_day = days[month - 1];
+    const bool leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    if (month == 2 && leap) {
+        max_day = 29;
+    }
+    return day <= max_day;
+}
+
 std::string normalize_inflect_text(std::string text) {
     replace_all(text, "\xE2\x80\x98", "'");
     replace_all(text, "\xE2\x80\x99", "'");
@@ -110,6 +296,143 @@ std::string normalize_inflect_text(std::string text) {
     for (const auto & [source, replacement] : abbreviations) {
         text = std::regex_replace(text, std::regex("\\b" + std::string(source), std::regex_constants::icase), replacement);
     }
+    text = regex_replace_fn(text, std::regex("\\b([A-Z])(?:\\.([A-Z]))+\\."), [](const std::smatch & match) {
+        std::string out;
+        for (char ch : match.str()) {
+            if (std::isupper(static_cast<unsigned char>(ch)) != 0) {
+                if (!out.empty()) {
+                    out.push_back(' ');
+                }
+                out.push_back(ch);
+            }
+        }
+        return out;
+    });
+    text = regex_replace_fn(
+        text,
+        std::regex("\\b(apartment|apt\\.?|suite|unit|room|flight|extension|order|invoice|locker|aisle|gate)\\s+([A-Za-z]?\\d{1,4}[A-Za-z]?)\\b", std::regex_constants::icase),
+        [](const std::smatch & match) {
+            return match[1].str() + " " + expand_identifier_token(match[2].str());
+        });
+    text = regex_replace_fn(
+        text,
+        std::regex("\\b(\\d{3})(?=\\s+(?:North|South|East|West)\\b)", std::regex_constants::icase),
+        [](const std::smatch & match) {
+            return identifier_digits(match[1].str());
+        });
+    text = regex_replace_fn(text, std::regex("\\$(\\d[\\d,]*(?:\\.\\d{1,2})?)"), [](const std::smatch & match) {
+        const std::string raw = strip_commas(match[1].str());
+        const size_t dot = raw.find('.');
+        const int64_t dollars = std::stoll(dot == std::string::npos ? raw : raw.substr(0, dot));
+        std::string out = int_to_cardinal(dollars) + (dollars == 1 ? " dollar" : " dollars");
+        if (dot != std::string::npos) {
+            std::string cents = raw.substr(dot + 1);
+            cents.resize(2, '0');
+            const int64_t cent_count = std::stoll(cents);
+            if (cent_count != 0) {
+                out += " and " + int_to_cardinal(cent_count) + (cent_count == 1 ? " cent" : " cents");
+            }
+        }
+        return out;
+    });
+    static const char * months[] = {
+        "January", "February", "March", "April", "May", "June",
+        "July", "August", "September", "October", "November", "December"};
+    text = regex_replace_fn(
+        text,
+        std::regex("\\b(0?[1-9]|1[0-2])/(0?[1-9]|[12]\\d|3[01])/(20\\d{2}|19\\d{2})\\b"),
+        [&](const std::smatch & match) {
+            const int month = std::stoi(match[1].str());
+            const int day = std::stoi(match[2].str());
+            const int year = std::stoi(match[3].str());
+            if (!valid_date(year, month, day)) {
+                return match.str();
+            }
+            return std::string(months[month - 1]) + " " + int_to_ordinal(day) + " " + int_to_cardinal(year);
+        });
+    text = regex_replace_fn(
+        text,
+        std::regex("\\b(\\d{1,2}):(\\d{2})\\s*([AaPp]\\.?\\s*[Mm]\\.?)?\\b"),
+        [](const std::smatch & match) {
+            const int hour = std::stoi(match[1].str());
+            const int minute = std::stoi(match[2].str());
+            std::string out = int_to_cardinal(hour);
+            if (minute == 0) {
+                out += " o clock";
+            } else if (minute < 10) {
+                out += " oh " + int_to_cardinal(minute);
+            } else {
+                out += " " + int_to_cardinal(minute);
+            }
+            std::string suffix = lower_ascii(match[3].str());
+            suffix.erase(std::remove_if(suffix.begin(), suffix.end(), [](unsigned char ch) {
+                return !std::isalpha(ch);
+            }), suffix.end());
+            for (char ch : suffix) {
+                out += " ";
+                out.push_back(ch);
+            }
+            return out;
+        });
+    text = regex_replace_fn(
+        text,
+        std::regex("\\b(\\d{1,2})\\s*([AaPp]\\.?\\s*[Mm]\\.?)\\b"),
+        [](const std::smatch & match) {
+            std::string suffix = lower_ascii(match[2].str());
+            suffix.erase(std::remove_if(suffix.begin(), suffix.end(), [](unsigned char ch) {
+                return !std::isalpha(ch);
+            }), suffix.end());
+            std::string out = int_to_cardinal(std::stoll(match[1].str()));
+            for (char ch : suffix) {
+                out += " ";
+                out.push_back(ch);
+            }
+            return out;
+        });
+    text = regex_replace_fn(text, std::regex("\\b(\\d{3})-(\\d{4})\\b"), [](const std::smatch & match) {
+        return digit_words(match[1].str()) + ", " + digit_words(match[2].str());
+    });
+    text = regex_replace_fn(text, std::regex("\\b\\d+(?:\\.\\d+){2,}\\b"), [](const std::smatch & match) {
+        std::string out;
+        size_t begin = 0;
+        const std::string value = match.str();
+        while (true) {
+            const size_t dot = value.find('.', begin);
+            const auto part = value.substr(begin, dot == std::string::npos ? std::string::npos : dot - begin);
+            if (!out.empty()) {
+                out += " point ";
+            }
+            out += int_to_cardinal(std::stoll(part));
+            if (dot == std::string::npos) {
+                break;
+            }
+            begin = dot + 1;
+        }
+        return out;
+    });
+    text = regex_replace_fn(text, std::regex("\\b(\\d+)\\.(\\d+)\\b"), [](const std::smatch & match) {
+        return int_to_cardinal(std::stoll(match[1].str())) + " point " + digit_words(match[2].str());
+    });
+    text = regex_replace_fn(text, std::regex("\\b(\\d+)(st|nd|rd|th)\\b", std::regex_constants::icase), [](const std::smatch & match) {
+        return int_to_ordinal(std::stoll(match[1].str()));
+    });
+    text = regex_replace_fn(text, std::regex("\\b\\d[\\d,]*\\b"), [](const std::smatch & match) {
+        const std::string value = strip_commas(match.str());
+        if (value.size() >= 5 && value.rfind("20", 0) != 0) {
+            return digit_words(value);
+        }
+        return int_to_cardinal(std::stoll(value));
+    });
+    text = regex_replace_fn(text, std::regex("\\b[A-Z]{2,}\\b"), [](const std::smatch & match) {
+        std::string out;
+        for (char ch : match.str()) {
+            if (!out.empty()) {
+                out.push_back(' ');
+            }
+            out += letter_name(ch);
+        }
+        return out;
+    });
     text = std::regex_replace(text, std::regex(",(?:\\s*,)+"), ",");
     text = std::regex_replace(text, std::regex(",\\s*([.!?])"), "$1");
     text = std::regex_replace(text, std::regex("\\s+([,;:.!?])"), "$1");
@@ -186,67 +509,33 @@ std::vector<std::string> utf8_symbols(const std::string & text) {
     return out;
 }
 
-class EspeakFrontend {
-public:
-    EspeakFrontend() {
-        library_ = engine::io::open_dynamic_library(
-            {"libespeak-ng.so.1", "libespeak-ng.so", "libespeak-ng.dylib", "libespeak-ng.dll", "espeak-ng.dll"});
-        if (library_ == nullptr) {
-            throw std::runtime_error("Inflect TTS official frontend requires eSpeak NG shared library");
-        }
-        initialize_ = reinterpret_cast<InitializeFn>(engine::io::dynamic_library_symbol(library_, "espeak_Initialize"));
-        set_voice_by_name_ =
-            reinterpret_cast<SetVoiceByNameFn>(engine::io::dynamic_library_symbol(library_, "espeak_SetVoiceByName"));
-        text_to_phonemes_ =
-            reinterpret_cast<TextToPhonemesFn>(engine::io::dynamic_library_symbol(library_, "espeak_TextToPhonemes"));
-        if (initialize_ == nullptr || set_voice_by_name_ == nullptr || text_to_phonemes_ == nullptr) {
-            throw std::runtime_error("Inflect TTS eSpeak NG frontend symbols were not resolved");
-        }
-        constexpr int kAudioOutputSynchronous = 2;
-        if (initialize_(kAudioOutputSynchronous, 0, nullptr, 0) < 0 || set_voice_by_name_("en-us") != 0) {
-            throw std::runtime_error("Inflect TTS failed to initialize eSpeak NG en-us frontend");
-        }
-    }
-
-    std::string phonemize_segment(const std::string & text) const {
-        constexpr int kCharsUtf8 = 1;
-        constexpr int kPhonemesIpa = 2;
-        const void * cursor = text.c_str();
-        std::string out;
-        while (cursor != nullptr && *static_cast<const char *>(cursor) != '\0') {
-            const void * before = cursor;
-            const char * phonemes = text_to_phonemes_(&cursor, kCharsUtf8, kPhonemesIpa);
-            if (phonemes != nullptr && phonemes[0] != '\0') {
-                if (!out.empty()) {
-                    out.push_back(' ');
-                }
-                out += phonemes;
-            }
-            if (cursor == before) {
-                break;
-            }
-        }
-        return out;
-    }
-
-private:
-    using InitializeFn = int (*)(int, int, const char *, int);
-    using SetVoiceByNameFn = int (*)(const char *);
-    using TextToPhonemesFn = const char * (*)(const void **, int, int);
-
-    engine::io::DynamicLibraryHandle library_ = nullptr;
-    InitializeFn initialize_ = nullptr;
-    SetVoiceByNameFn set_voice_by_name_ = nullptr;
-    TextToPhonemesFn text_to_phonemes_ = nullptr;
-};
-
-const EspeakFrontend & espeak_frontend() {
-    static const EspeakFrontend frontend;
-    return frontend;
-}
-
 bool is_preserved_punctuation(char ch) {
     return ch == ',' || ch == ';' || ch == ':' || ch == '.' || ch == '!' || ch == '?';
+}
+
+std::string translate_misaki_phonemes_to_inflect_symbols(const std::string & phonemes) {
+    std::string out;
+    out.reserve(phonemes.size());
+    const auto symbols = utf8_symbols(phonemes);
+    for (const auto & symbol : symbols) {
+        if (symbol.size() == 1) {
+            switch (symbol[0]) {
+                case 'A': out += "eɪ"; continue;
+                case 'I': out += "aɪ"; continue;
+                case 'O': out += "oʊ"; continue;
+                case 'Q': out += "ɔɪ"; continue;
+                case 'W': out += "aʊ"; continue;
+                case 'Y': out += "ju"; continue;
+                default: break;
+            }
+        }
+        if (symbol == "ᵊ") {
+            out += "ə";
+            continue;
+        }
+        out += symbol;
+    }
+    return out;
 }
 
 std::string apply_phoneme_overrides(std::string phoneme_text) {
@@ -255,7 +544,9 @@ std::string apply_phoneme_overrides(std::string phoneme_text) {
     return normalize_spaces(phoneme_text);
 }
 
-std::string phonemize_inflect_text(const std::string & text) {
+std::string phonemize_inflect_text(
+    const std::string & text,
+    const engine::text::english_g2p::EnglishG2P & english_g2p) {
     const std::string normalized = normalize_inflect_text(text);
     std::string out;
     std::string segment;
@@ -265,13 +556,11 @@ std::string phonemize_inflect_text(const std::string & text) {
         if (trimmed.empty()) {
             return;
         }
-        const std::string phonemes = espeak_frontend().phonemize_segment(trimmed);
-        if (!phonemes.empty()) {
-            if (!out.empty() && out.back() != ' ') {
-                out.push_back(' ');
-            }
-            out += phonemes;
+        const auto phonemes = english_g2p(trimmed, false).first;
+        if (!out.empty() && out.back() != ' ') {
+            out.push_back(' ');
         }
+        out += translate_misaki_phonemes_to_inflect_symbols(phonemes);
     };
     for (char ch : normalized) {
         if (is_preserved_punctuation(ch)) {
@@ -336,15 +625,17 @@ std::vector<std::string> split_inflect_text_chunks(const std::string & text, int
     return chunks;
 }
 
-std::vector<int32_t> encode_inflect_text(const std::string & text) {
-    const auto phonemes = utf8_symbols(phonemize_inflect_text(text));
+std::vector<int32_t> encode_inflect_text(
+    const std::string & text,
+    const engine::text::english_g2p::EnglishG2P & english_g2p) {
+    const auto phonemes = utf8_symbols(phonemize_inflect_text(text, english_g2p));
     std::vector<int32_t> sequence;
     sequence.reserve(phonemes.size() * 2 + 1);
     sequence.push_back(0);
     for (const auto & symbol : phonemes) {
         const auto it = vocab().find(symbol);
         if (it == vocab().end()) {
-            continue;
+            throw std::runtime_error("Inflect TTS frontend produced unsupported symbol: " + symbol);
         }
         sequence.push_back(it->second);
         sequence.push_back(0);

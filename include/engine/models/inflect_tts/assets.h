@@ -2,6 +2,7 @@
 
 #include "engine/framework/assets/resource_bundle.h"
 #include "engine/framework/assets/tensor_source.h"
+#include "engine/framework/text/english_g2p.h"
 
 #include <cstdint>
 #include <filesystem>
@@ -25,6 +26,7 @@ struct InflectConfig {
 struct InflectAssets {
     assets::ResourceBundle resources;
     InflectConfig config;
+    std::shared_ptr<const engine::text::english_g2p::EnglishG2P> english_g2p;
     std::shared_ptr<const assets::TensorSource> weights;
 };
 

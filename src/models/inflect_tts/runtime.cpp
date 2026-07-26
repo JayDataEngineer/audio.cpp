@@ -18,6 +18,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <memory>
 #include <numeric>
 #include <random>
 #include <stdexcept>
@@ -126,6 +127,7 @@ core::TensorValue mul_tensors(
 
 struct GraphUploads {
     std::vector<std::pair<ggml_tensor *, std::vector<float>>> f32;
+    std::vector<std::pair<ggml_tensor *, std::vector<int32_t>>> i32;
 };
 
 core::TensorValue make_f32_input(
@@ -135,6 +137,16 @@ core::TensorValue make_f32_input(
     GraphUploads & uploads) {
     auto tensor = core::make_tensor(ctx, GGML_TYPE_F32, shape);
     uploads.f32.emplace_back(tensor.tensor, std::move(values));
+    return tensor;
+}
+
+core::TensorValue make_i32_input(
+    core::ModuleBuildContext & ctx,
+    const core::TensorShape & shape,
+    std::vector<int32_t> values,
+    GraphUploads & uploads) {
+    auto tensor = core::make_tensor(ctx, GGML_TYPE_I32, shape);
+    uploads.i32.emplace_back(tensor.tensor, std::move(values));
     return tensor;
 }
 
@@ -273,6 +285,43 @@ core::TensorValue conv1d(
     return output;
 }
 
+core::TensorValue relative_position_to_absolute_position(
+    core::ModuleBuildContext & ctx,
+    const core::TensorValue & input,
+    int64_t length) {
+    auto x = ensure_contiguous(ctx, input);
+    x = core::wrap_tensor(
+        ggml_pad(ctx.ggml, x.tensor, 1, 0, 0, 0),
+        core::TensorShape::from_dims({length, 2 * length}),
+        GGML_TYPE_F32);
+    x = core::reshape_tensor(ctx, ensure_contiguous(ctx, x), core::TensorShape::from_dims({length * 2 * length}));
+    x = core::wrap_tensor(
+        ggml_pad(ctx.ggml, x.tensor, static_cast<int>(length - 1), 0, 0, 0),
+        core::TensorShape::from_dims({length * 2 * length + length - 1}),
+        GGML_TYPE_F32);
+    x = core::reshape_tensor(ctx, ensure_contiguous(ctx, x), core::TensorShape::from_dims({length + 1, 2 * length - 1}));
+    x = modules::SliceModule({0, 0, length}).build(ctx, x);
+    return modules::SliceModule({1, length - 1, length}).build(ctx, x);
+}
+
+core::TensorValue absolute_position_to_relative_position(
+    core::ModuleBuildContext & ctx,
+    const core::TensorValue & input,
+    int64_t length) {
+    auto x = ensure_contiguous(ctx, input);
+    x = core::wrap_tensor(
+        ggml_pad(ctx.ggml, x.tensor, static_cast<int>(length - 1), 0, 0, 0),
+        core::TensorShape::from_dims({length, 2 * length - 1}),
+        GGML_TYPE_F32);
+    x = core::reshape_tensor(ctx, ensure_contiguous(ctx, x), core::TensorShape::from_dims({length * (2 * length - 1)}));
+    x = core::wrap_tensor(
+        ggml_pad_ext(ctx.ggml, x.tensor, static_cast<int>(length), 0, 0, 0, 0, 0, 0, 0),
+        core::TensorShape::from_dims({length * (2 * length - 1) + length}),
+        GGML_TYPE_F32);
+    x = core::reshape_tensor(ctx, ensure_contiguous(ctx, x), core::TensorShape::from_dims({length, 2 * length}));
+    return modules::SliceModule({1, 1, 2 * length - 1}).build(ctx, x);
+}
+
 core::TensorValue channel_layer_norm(
     core::ModuleBuildContext & ctx,
     const core::TensorValue & input,
@@ -330,15 +379,7 @@ core::TensorValue maskless_attention(
             ggml_scale(ctx.ggml, rel_logits.tensor, 1.0f / std::sqrt(static_cast<float>(head_dim))),
             rel_logits.shape,
             GGML_TYPE_F32);
-        core::TensorValue relative_scores;
-        for (int64_t query = 0; query < frames; ++query) {
-            auto row = modules::SliceModule({0, query, 1}).build(ctx, rel_logits);
-            row = modules::SliceModule({1, frames - 1 - query, frames}).build(ctx, row);
-            row = ensure_contiguous(ctx, row);
-            relative_scores = relative_scores.valid()
-                ? modules::ConcatModule({0}).build(ctx, relative_scores, row)
-                : row;
-        }
+        auto relative_scores = relative_position_to_absolute_position(ctx, rel_logits, frames);
         scores = add_tensors(ctx, scores, relative_scores);
         auto attn = core::wrap_tensor(
             ggml_soft_max(ctx.ggml, ensure_contiguous(ctx, scores).tensor),
@@ -346,17 +387,8 @@ core::TensorValue maskless_attention(
             GGML_TYPE_F32);
         auto vh_td = ensure_contiguous(ctx, modules::TransposeModule({{1, 0, 2, 3}, 2}).build(ctx, vh));
         auto context = matmul.build(ctx, ensure_contiguous(ctx, attn), vh_td);
-        core::TensorValue relative_context;
-        for (int64_t query = 0; query < frames; ++query) {
-            auto weights_row = modules::SliceModule({0, query, 1}).build(ctx, attn);
-            weights_row = ensure_contiguous(ctx, weights_row);
-            auto value_rows = modules::SliceModule({0, frames - 1 - query, frames}).build(ctx, relative_v);
-            value_rows = ensure_contiguous(ctx, value_rows);
-            auto row = matmul.build(ctx, weights_row, value_rows);
-            relative_context = relative_context.valid()
-                ? modules::ConcatModule({0}).build(ctx, relative_context, row)
-                : row;
-        }
+        auto relative_weights = absolute_position_to_relative_position(ctx, attn, frames);
+        auto relative_context = matmul.build(ctx, ensure_contiguous(ctx, relative_weights), relative_v);
         context = add_tensors(ctx, context, relative_context);
         context = modules::TransposeModule({{1, 0, 2, 3}, 2}).build(ctx, context);
         context = core::reshape_tensor(ctx, ensure_contiguous(ctx, context), core::TensorShape::from_dims({1, head_dim, frames}));
@@ -507,23 +539,39 @@ core::TensorValue residual_coupling_reverse(
     return modules::ConcatModule({1}).build(ctx, x0, x1);
 }
 
-core::TensorValue flip_channels(core::ModuleBuildContext & ctx, const core::TensorValue & input) {
-    core::TensorValue output;
-    for (int64_t channel = input.shape.dims[1] - 1; channel >= 0; --channel) {
-        auto slice = modules::SliceModule({1, channel, 1}).build(ctx, input);
-        output = output.valid() ? modules::ConcatModule({1}).build(ctx, output, slice) : slice;
-    }
-    return output;
+core::TensorValue flip_channels(
+    core::ModuleBuildContext & ctx,
+    const core::TensorValue & input,
+    const core::TensorValue & indices) {
+    const int64_t channels = input.shape.dims[1];
+    const int64_t frames = input.shape.dims[2];
+    const auto matrix = core::reshape_tensor(ctx, ensure_contiguous(ctx, input), core::TensorShape::from_dims({channels, frames}));
+    auto gathered = core::wrap_tensor(
+        ggml_get_rows(ctx.ggml, matrix.tensor, indices.tensor),
+        core::TensorShape::from_dims({channels, frames}),
+        input.type);
+    return core::reshape_tensor(ctx, ensure_contiguous(ctx, gathered), input.shape);
 }
 
 core::TensorValue flow_reverse(
     core::ModuleBuildContext & ctx,
     const core::TensorValue & input,
     const WeightMap & weights,
-    const InflectConfig & config) {
+    const InflectConfig & config,
+    GraphUploads & uploads) {
     auto x = input;
+    auto index_values = std::vector<int32_t>{};
+    index_values.reserve(static_cast<size_t>(config.inter_channels));
+    for (int64_t channel = config.inter_channels - 1; channel >= 0; --channel) {
+        index_values.push_back(static_cast<int32_t>(channel));
+    }
+    const auto reverse_indices = make_i32_input(
+        ctx,
+        core::TensorShape::from_dims({config.inter_channels}),
+        std::move(index_values),
+        uploads);
     for (int64_t flow = 3; flow >= 0; --flow) {
-        x = flip_channels(ctx, x);
+        x = flip_channels(ctx, x, reverse_indices);
         x = residual_coupling_reverse(ctx, x, weights, flow * 2, config);
     }
     return x;
@@ -696,8 +744,9 @@ core::TensorValue vocoder_graph_output(
     core::ModuleBuildContext & ctx,
     const core::TensorValue & z,
     const WeightMap & weights,
-    const InflectConfig & config) {
-    auto x_value = flow_reverse(ctx, z, weights, config);
+    const InflectConfig & config,
+    GraphUploads & uploads) {
+    auto x_value = flow_reverse(ctx, z, weights, config, uploads);
     auto * x = ggml_reshape_2d(
         ctx.ggml,
         contiguous_if_needed(ctx.ggml, x_value.tensor),
@@ -781,18 +830,29 @@ public:
 
 private:
     std::vector<float> synthesize_chunk(const std::string & text, const InflectSynthesisOptions & options) {
-        const auto ids = encode_inflect_text(text);
+        const auto ids = encode_inflect_text(text, *assets_->english_g2p);
         const int64_t text_frames = static_cast<int64_t>(ids.size());
-        auto prior_ctx = make_context();
-        core::ModuleBuildContext prior_build{prior_ctx.get(), "inflect.prior", execution_context_.backend_type()};
-        auto ids_value = core::make_tensor(prior_build, GGML_TYPE_I32, core::TensorShape::from_dims({text_frames}));
+        std::unique_ptr<ggml_context, GgmlContextDeleter> prior_ctx;
+        core::ModuleBuildContext prior_build{};
+        core::TensorValue ids_value;
         GraphUploads uploads;
-        auto prior = prior_graph_output(prior_build, ids_value, weights_, assets_->config, uploads);
-        auto * prior_graph = prior_runner_.allocate(prior_ctx.get(), prior.tensor);
-        set_tensor_i32(ids_value.tensor, ids);
-        for (const auto & upload : uploads.f32) {
-            set_tensor_f32(upload.first, upload.second);
-        }
+        core::TensorValue prior;
+        const double prior_build_ms = engine::debug::measure_ms([&]() {
+            prior_ctx = make_context();
+            prior_build = core::ModuleBuildContext{prior_ctx.get(), "inflect.prior", execution_context_.backend_type()};
+            ids_value = core::make_tensor(prior_build, GGML_TYPE_I32, core::TensorShape::from_dims({text_frames}));
+            prior = prior_graph_output(prior_build, ids_value, weights_, assets_->config, uploads);
+        });
+        ggml_cgraph * prior_graph = nullptr;
+        const double prior_alloc_ms = engine::debug::measure_ms([&]() {
+            prior_graph = prior_runner_.allocate(prior_ctx.get(), prior.tensor);
+        });
+        const double prior_upload_ms = engine::debug::measure_ms([&]() {
+            set_tensor_i32(ids_value.tensor, ids);
+            for (const auto & upload : uploads.f32) {
+                set_tensor_f32(upload.first, upload.second);
+            }
+        });
         const double prior_ms = engine::debug::measure_ms([&]() {
             prior_runner_.compute(prior_graph, "inflect_tts.prior");
         });
@@ -810,24 +870,46 @@ private:
         auto samples = std::vector<float>{};
         double vocoder_ms = 0.0;
         double audio_read_ms = 0.0;
-        auto vocoder_ctx = make_context(256ull * 1024ull * 1024ull);
-        core::ModuleBuildContext vocoder_build{vocoder_ctx.get(), "inflect.vocoder", execution_context_.backend_type()};
-        auto z_value = core::make_tensor(
-            vocoder_build,
-            GGML_TYPE_F32,
-            core::TensorShape::from_dims({1, assets_->config.inter_channels, latent_frames}));
-        auto audio = vocoder_graph_output(vocoder_build, z_value, weights_, assets_->config);
-        auto * vocoder_graph = vocoder_runner_.allocate(vocoder_ctx.get(), audio.tensor);
-        set_tensor_f32(z_value.tensor, z);
+        std::unique_ptr<ggml_context, GgmlContextDeleter> vocoder_ctx;
+        core::ModuleBuildContext vocoder_build{};
+        GraphUploads vocoder_uploads;
+        core::TensorValue z_value;
+        core::TensorValue audio;
+        const double vocoder_build_ms = engine::debug::measure_ms([&]() {
+            vocoder_ctx = make_context(256ull * 1024ull * 1024ull);
+            vocoder_build = core::ModuleBuildContext{
+                vocoder_ctx.get(), "inflect.vocoder", execution_context_.backend_type()};
+            z_value = core::make_tensor(
+                vocoder_build,
+                GGML_TYPE_F32,
+                core::TensorShape::from_dims({1, assets_->config.inter_channels, latent_frames}));
+            audio = vocoder_graph_output(vocoder_build, z_value, weights_, assets_->config, vocoder_uploads);
+        });
+        ggml_cgraph * vocoder_graph = nullptr;
+        const double vocoder_alloc_ms = engine::debug::measure_ms([&]() {
+            vocoder_graph = vocoder_runner_.allocate(vocoder_ctx.get(), audio.tensor);
+        });
+        const double z_upload_ms = engine::debug::measure_ms([&]() {
+            set_tensor_f32(z_value.tensor, z);
+            for (const auto & upload : vocoder_uploads.i32) {
+                set_tensor_i32(upload.first, upload.second);
+            }
+        });
         vocoder_ms = engine::debug::measure_ms([&]() {
             vocoder_runner_.compute(vocoder_graph, "inflect_tts.vocoder");
         });
         audio_read_ms = engine::debug::measure_ms([&]() {
             samples = get_tensor_f32(audio.tensor);
         });
+        engine::debug::timing_log_scalar("inflect_tts.prior_build_ms", prior_build_ms);
+        engine::debug::timing_log_scalar("inflect_tts.prior_alloc_ms", prior_alloc_ms);
+        engine::debug::timing_log_scalar("inflect_tts.prior_upload_ms", prior_upload_ms);
         engine::debug::timing_log_scalar("inflect_tts.prior_compute_ms", prior_ms);
         engine::debug::timing_log_scalar("inflect_tts.prior_read_sample_ms", prior_read_ms);
         engine::debug::timing_log_scalar("inflect_tts.sample_ms", sample_ms);
+        engine::debug::timing_log_scalar("inflect_tts.vocoder_build_ms", vocoder_build_ms);
+        engine::debug::timing_log_scalar("inflect_tts.vocoder_alloc_ms", vocoder_alloc_ms);
+        engine::debug::timing_log_scalar("inflect_tts.z_upload_ms", z_upload_ms);
         engine::debug::timing_log_scalar("inflect_tts.vocoder_compute_ms", vocoder_ms);
         engine::debug::timing_log_scalar("inflect_tts.audio_read_ms", audio_read_ms);
         return samples;

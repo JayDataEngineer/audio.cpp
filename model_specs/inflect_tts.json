@@ -7,7 +7,9 @@
         "model": "."
       },
       "files": {
-        "config": "model:config.json"
+        "config": "model:config.json",
+        "english_g2p_us_gold": "model:misaki_en/us_gold.tsv",
+        "english_g2p_us_silver": "model:misaki_en/us_silver.tsv"
       },
       "tensors": {
         "weights": "model:inflect-micro-v2.safetensors"
@@ -20,7 +22,9 @@
         "weights": "$gguf"
       },
       "files": {
-        "config": "model:config.json"
+        "config": "model:config.json",
+        "english_g2p_us_gold": "model:misaki_en/us_gold.tsv",
+        "english_g2p_us_silver": "model:misaki_en/us_silver.tsv"
       },
       "tensors": {
         "weights": "weights:"

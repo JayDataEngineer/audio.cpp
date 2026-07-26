@@ -187,6 +187,7 @@ add_library(engine_runtime STATIC
     src/framework/io/text.cpp
     src/framework/text/chinese_normalization.cpp
     src/framework/text/chunking.cpp
+    src/framework/text/english_g2p.cpp
     src/framework/text/subtitle.cpp
     src/framework/io/yaml.cpp
     src/framework/io/binary.cpp

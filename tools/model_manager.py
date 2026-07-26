@@ -413,15 +413,36 @@ CATALOG: tuple[ModelPackage, ...] = (
         id="inflect_tts",
         display_name="Inflect Micro v2",
         target_directory="Inflect-Micro-v2",
-        source=SnapshotSource(
-            repo_id="owensong/Inflect-Micro-v2",
-            include_prefixes=(
-                "config.json",
-                "inference.py",
-                "inflect_nano_v2_frontend.py",
-                "inflect_vits_frontend.py",
-                "model.pth",
-                "runtime/",
+        source=CompositeSnapshotSource(
+            placements=(
+                SnapshotPlacement(
+                    source=SnapshotSource(
+                        repo_id="owensong/Inflect-Micro-v2",
+                        include_prefixes=(
+                            "config.json",
+                            "inference.py",
+                            "inflect_nano_v2_frontend.py",
+                            "inflect_vits_frontend.py",
+                            "model.pth",
+                            "runtime/",
+                        ),
+                    ),
+                    required_files=(
+                        "config.json",
+                        "inference.py",
+                        "inflect_nano_v2_frontend.py",
+                        "inflect_vits_frontend.py",
+                        "model.pth",
+                        "runtime/inflect_alias_free.py",
+                    ),
+                ),
+                SnapshotPlacement(
+                    source=SnapshotSource(
+                        repo_id="mlx-community/kokoro_mlx",
+                        include_prefixes=("misaki_en/us_gold.tsv", "misaki_en/us_silver.tsv"),
+                    ),
+                    required_files=("misaki_en/us_gold.tsv", "misaki_en/us_silver.tsv"),
+                ),
             ),
         ),
         required_files=(
@@ -431,6 +452,8 @@ CATALOG: tuple[ModelPackage, ...] = (
             "inflect_vits_frontend.py",
             "model.pth",
             "runtime/inflect_alias_free.py",
+            "misaki_en/us_gold.tsv",
+            "misaki_en/us_silver.tsv",
             "inflect-micro-v2.safetensors",
         ),
         description="Downloads Inflect Micro v2 and exports the folded inference weights used by audio.cpp.",
@@ -1968,6 +1991,8 @@ def install_composite_snapshot(
             convert_ace_step_silence_latent(staged_package_root / "acestep-v15-base")
         elif package.id == "moss_tts_nano_100m":
             convert_moss_tts_weights(staged_package_root)
+        elif package.id == "inflect_tts":
+            convert_inflect_micro_v2_weights(staged_package_root)
         elif package.id in {"irodori_tts_500m_v3", "irodori_tts_600m_v3_voice_design"}:
             write_irodori_model_config(staged_package_root)
             dacvae_root = staged_package_root.parent / "Semantic-DACVAE-Japanese-32dim"
