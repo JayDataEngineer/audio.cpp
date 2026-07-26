@@ -640,7 +640,7 @@ ggml_tensor * conv1d_2d(
 }
 
 ggml_tensor * conv_transpose1d_2d(
-    ggml_context * ctx,
+    core::ModuleBuildContext & ctx,
     ggml_tensor * x,
     const WeightMap & weights,
     const std::string & prefix,
@@ -649,18 +649,22 @@ ggml_tensor * conv_transpose1d_2d(
     int64_t kernel,
     int stride,
     int padding) {
-    auto * weight = weight_3d(ctx, weights.at(prefix + ".weight"), kernel, out_channels, in_channels, prefix + ".weight");
-    auto * y_full = ggml_conv_transpose_1d(ctx, weight, contiguous_if_needed(ctx, x), stride, 0, 1);
-    const int64_t cropped_len = (x->ne[0] - 1) * stride - 2 * padding + kernel;
-    auto * y = ggml_view_2d(
-        ctx,
-        y_full,
-        cropped_len,
+    const auto input = core::wrap_tensor(
+        ggml_reshape_3d(ctx.ggml, contiguous_if_needed(ctx.ggml, x), x->ne[0], in_channels, 1),
+        core::TensorShape::from_dims({1, in_channels, x->ne[0]}),
+        GGML_TYPE_F32);
+    const auto output = modules::ConvTranspose1dModule({
+        in_channels,
         out_channels,
-        y_full->nb[1],
-        static_cast<size_t>(padding) * sizeof(float));
-    y = ggml_add(ctx, y, weight_2d(ctx, weights.at(prefix + ".bias"), 1, out_channels, prefix + ".bias"));
-    return named(y, prefix.c_str());
+        kernel,
+        stride,
+        padding,
+        1,
+        true,
+    }).build(ctx, input, {weights.at(prefix + ".weight"), weights.at(prefix + ".bias")});
+    return named(
+        ggml_reshape_2d(ctx.ggml, output.tensor, output.shape.dims[2], out_channels),
+        prefix.c_str());
 }
 
 ggml_tensor * decoder_resblock_2d(
@@ -714,7 +718,7 @@ core::TensorValue decoder(
     for (int stage = 0; stage < 4; ++stage) {
         x = ggml_leaky_relu(ctx.ggml, contiguous_if_needed(ctx.ggml, x), 0.1f, false);
         x = conv_transpose1d_2d(
-            ctx.ggml,
+            ctx,
             x,
             weights,
             "dec.ups." + std::to_string(stage),
@@ -867,9 +871,6 @@ private:
             });
         });
 
-        auto samples = std::vector<float>{};
-        double vocoder_ms = 0.0;
-        double audio_read_ms = 0.0;
         std::unique_ptr<ggml_context, GgmlContextDeleter> vocoder_ctx;
         core::ModuleBuildContext vocoder_build{};
         GraphUploads vocoder_uploads;
@@ -895,10 +896,11 @@ private:
                 set_tensor_i32(upload.first, upload.second);
             }
         });
-        vocoder_ms = engine::debug::measure_ms([&]() {
+        const double vocoder_ms = engine::debug::measure_ms([&]() {
             vocoder_runner_.compute(vocoder_graph, "inflect_tts.vocoder");
         });
-        audio_read_ms = engine::debug::measure_ms([&]() {
+        std::vector<float> samples;
+        const double audio_read_ms = engine::debug::measure_ms([&]() {
             samples = get_tensor_f32(audio.tensor);
         });
         engine::debug::timing_log_scalar("inflect_tts.prior_build_ms", prior_build_ms);
