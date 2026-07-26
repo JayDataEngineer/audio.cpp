@@ -524,10 +524,19 @@ std::string translate_misaki_phonemes_to_inflect_symbols(const std::string & pho
                 case 'I': out += "aɪ"; continue;
                 case 'O': out += "oʊ"; continue;
                 case 'Q': out += "ɔɪ"; continue;
+                case 'T': out += "ɾ"; continue;
                 case 'W': out += "aʊ"; continue;
                 case 'Y': out += "ju"; continue;
                 default: break;
             }
+        }
+        if (symbol == "ʧ") {
+            out += "tʃ";
+            continue;
+        }
+        if (symbol == "ʤ") {
+            out += "dʒ";
+            continue;
         }
         if (symbol == "ᵊ") {
             out += "ə";
@@ -539,6 +548,8 @@ std::string translate_misaki_phonemes_to_inflect_symbols(const std::string & pho
 }
 
 std::string apply_phoneme_overrides(std::string phoneme_text) {
+    replace_all(phoneme_text, "əɹi", "ɚɹi");
+    replace_all(phoneme_text, "əɹ", "ɚ");
     replace_all(phoneme_text, "sˈæskɐtʃˌuːən", "sɐskˈætʃəwən");
     replace_all(phoneme_text, "flʊɹɹˈɛsənt", "flʊˈɹɛsənt");
     return normalize_spaces(phoneme_text);

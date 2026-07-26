@@ -649,6 +649,26 @@ ggml_tensor * conv_transpose1d_2d(
     int64_t kernel,
     int stride,
     int padding) {
+    if (ctx.backend_type == core::BackendType::Cpu && padding > 0) {
+        auto * input = contiguous_if_needed(ctx.ggml, x);
+        auto * weight = weights.at(prefix + ".weight").tensor;
+        if (weight->type != GGML_TYPE_F32) {
+            weight = ggml_cast(ctx.ggml, weight, GGML_TYPE_F32);
+        }
+        const int64_t full_frames = (x->ne[0] - 1) * stride + kernel;
+        auto * output = ggml_conv_transpose_1d(ctx.ggml, weight, input, stride, 0, 1);
+        output = ggml_reshape_2d(ctx.ggml, output, full_frames, out_channels);
+        output = ggml_view_2d(
+            ctx.ggml,
+            output,
+            full_frames - 2 * padding,
+            out_channels,
+            ggml_row_size(output->type, full_frames),
+            ggml_row_size(output->type, padding));
+        output = contiguous_if_needed(ctx.ggml, output);
+        output = ggml_add(ctx.ggml, output, weight_2d(ctx.ggml, weights.at(prefix + ".bias"), 1, out_channels, prefix + ".bias"));
+        return named(output, prefix.c_str());
+    }
     const auto input = core::wrap_tensor(
         ggml_reshape_3d(ctx.ggml, contiguous_if_needed(ctx.ggml, x), x->ne[0], in_channels, 1),
         core::TensorShape::from_dims({1, in_channels, x->ne[0]}),
