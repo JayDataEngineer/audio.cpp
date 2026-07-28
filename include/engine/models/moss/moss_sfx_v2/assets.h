@@ -2,6 +2,7 @@
 
 #include "engine/framework/assets/resource_bundle.h"
 #include "engine/models/moss/moss_sfx_v2/dit_runner.h"
+#include "engine/models/moss/moss_sfx_v2/text_encoder.h"
 #include "engine/models/moss/moss_sfx_v2/vae_runner.h"
 
 #include <cstdint>
@@ -25,6 +26,7 @@ struct SfxSchedulerConfig {
 struct SfxConfig {
     DitConfig             dit;
     VAEConfig             vae;
+    TextEncoderConfig     te;        // parsed from the TE GGUF KV (qwen3.*)
     int32_t               sample_rate = 48000;
     SfxSchedulerConfig    scheduler;
 };
@@ -37,6 +39,10 @@ struct MossSfxV2Assets {
     std::shared_ptr<const assets::TensorSource> dit_weights;
     std::shared_ptr<const assets::TensorSource> vae_weights;
     std::shared_ptr<const assets::TensorSource> te_weights;  // may be nullptr
+    // Directory holding the HF tokenizer files (vocab.json, merges.txt,
+    // tokenizer_config.json) for the Qwen3 text encoder. Empty when not found;
+    // the session then falls back to a zero context.
+    std::filesystem::path  tokenizer_dir;
 };
 
 // Parses config.json (architecture overrides) + GGUF KV metadata into SfxConfig.

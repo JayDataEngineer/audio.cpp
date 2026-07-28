@@ -4,6 +4,7 @@
 #include "engine/framework/runtime/session_base.h"
 #include "engine/models/moss/moss_sfx_v2/assets.h"
 #include "engine/models/moss/moss_sfx_v2/dit_runner.h"
+#include "engine/models/moss/moss_sfx_v2/text_encoder.h"
 #include "engine/models/moss/moss_sfx_v2/vae_runner.h"
 #include "engine/models/moss/moss_sfx_v2/weight_bridge.h"
 
@@ -66,9 +67,11 @@ private:
     // vae_weights_->ctx.
     std::unique_ptr<LoadedWeights> dit_weights_;
     std::unique_ptr<LoadedWeights> vae_weights_;
+    std::unique_ptr<LoadedWeights> te_weights_;
 
-    std::unique_ptr<DiTRunner> dit_runner_;
-    std::unique_ptr<VAERunner> vae_runner_;
+    std::unique_ptr<DiTRunner>         dit_runner_;
+    std::unique_ptr<VAERunner>         vae_runner_;
+    std::unique_ptr<TextEncoderRunner> text_encoder_;  // nullptr when no TE GGUF / tokenizer
 };
 
 }  // namespace engine::models::moss_sfx_v2

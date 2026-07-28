@@ -7,6 +7,7 @@
 #include "engine/models/moss/moss_sfx_v2/session.h"
 
 #include "engine/framework/runtime/options.h"
+#include "engine/framework/tokenizers/llama_bpe.h"
 
 #include "ggml.h"
 
@@ -16,6 +17,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -25,6 +27,36 @@
 namespace engine::models::moss_sfx_v2 {
 
 namespace runtime = engine::runtime;
+namespace fs = std::filesystem;
+
+// Build the Qwen3 BPE tokenizer for the text encoder from the HF tokenizer
+// directory discovered by assets.cpp (vocab.json + merges.txt +
+// tokenizer_config.json). Returns nullptr if the files are not present.
+std::shared_ptr<tokenizers::LlamaBpeTokenizer> build_te_tokenizer(
+    const fs::path& tokenizer_dir, const TextEncoderConfig& /*te_cfg*/) {
+    if (tokenizer_dir.empty()) return nullptr;
+    auto exists = [](const fs::path& p) {
+        return !p.empty() && fs::exists(p) && fs::is_regular_file(p);
+    };
+    fs::path vocab = tokenizer_dir / "vocab.json";
+    fs::path merges = tokenizer_dir / "merges.txt";
+    fs::path tcfg = tokenizer_dir / "tokenizer_config.json";
+    if (!exists(vocab) || !exists(merges) || !exists(tcfg)) return nullptr;
+
+    tokenizers::LlamaBpeTokenizerSpec spec;
+    spec.vocab_path            = vocab;
+    spec.merges_path           = merges;
+    spec.tokenizer_config_path = tcfg;
+    spec.pre_type              = tokenizers::LlamaBpePreTokenizer::Qwen2;
+    // tokenizer.json optional — the Qwen2 pre-tokenizer reconstructs from
+    // vocab+merges+config here (matches qwen3_tts/tokenizer_text.cpp).
+    try {
+        return tokenizers::load_llama_bpe_tokenizer(spec);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "[moss_sfx_v2] TE tokenizer load failed: %s\n", e.what());
+        return nullptr;
+    }
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  Construction / teardown
@@ -91,6 +123,35 @@ void MossSfxV2Session::prepare(const runtime::SessionPreparationRequest& /*reque
         vae_runner_ = std::make_unique<VAERunner>(vae_ctx, cfg.vae);
     }
 
+    // Optional Qwen3 text-encoder sidecar. Built only when the TE GGUF is
+    // present AND the HF tokenizer files (vocab/merges/tokenizer_config) are
+    // discoverable. When absent, run_sfx falls back to a zero context — the
+    // same path audiocore's broken TE effectively exercised.
+    if (assets_->te_weights) {
+        te_weights_ = load_weights_into_context(
+            *assets_->te_weights, /*prefix=*/"",
+            /*capacity_tensors=*/1024, &err);
+        if (!te_weights_) {
+            std::fprintf(stderr,
+                "[moss_sfx_v2] TE weight bridge failed (falling back to zero context): %s\n",
+                err.c_str());
+        } else {
+            std::shared_ptr<tokenizers::LlamaBpeTokenizer> tokenizer =
+                build_te_tokenizer(assets_->tokenizer_dir, cfg.te);
+            if (tokenizer) {
+                text_encoder_ = std::make_unique<TextEncoderRunner>(
+                    te_weights_->ctx, cfg.te, std::move(tokenizer));
+                std::fprintf(stderr,
+                    "[moss_sfx_v2] TE enabled (Qwen3: %d layers, hidden=%d, heads=%d/%d kv, hd=%d)\n",
+                    cfg.te.n_layers, cfg.te.hidden, cfg.te.n_heads, cfg.te.n_kv_heads, cfg.te.head_dim);
+            } else {
+                std::fprintf(stderr,
+                    "[moss_sfx_v2] TE tokenizer files not found at \"%s\" (zero-context fallback)\n",
+                    assets_->tokenizer_dir.string().c_str());
+            }
+        }
+    }
+
     mark_prepared();
 }
 
@@ -155,16 +216,53 @@ bool MossSfxV2Session::run_sfx(
     // CRITICAL: WanPrompter always pads the tokenized prompt to 512 positions.
     // The DiT cross-attention expects 512 KV pairs. With only the real token
     // count the velocity is ~200× too large, causing trajectory divergence.
-    // No-TE path (Phase 1): zero context padded to 512 — matches audiocore's
-    // no-TE fallback. A real Qwen3 TE is wired in a later phase.
+    //
+    // MossSoundEffectPipeline appends a duration suffix before encoding
+    // (append_duration_suffix=True): f"{prompt} duration: {seconds:.1f}s".
+    // The unconditional (empty negative_prompt) branch yields n_real=0, i.e.
+    // an all-zero embedding — so uncond is always zero by construction.
     constexpr int32_t kTextLen = 512;
     const int32_t T_cond = kTextLen;
     const int32_t T_uncond = kTextLen;
     std::vector<float> cond_emb(static_cast<size_t>(kTextLen) * dc.text_dim, 0.0f);
     std::vector<float> uncond_emb(static_cast<size_t>(kTextLen) * dc.text_dim, 0.0f);
-    std::fprintf(stderr,
-        "[moss_sfx_v2] TE: no-TE path (zero context, T=%d) prompt=\"%s\"\n",
-        T_cond, prompt.c_str());
+
+    const float dur_rounded = std::round(duration_sec * 10.0f) / 10.0f;
+    char dur_suffix[48];
+    std::snprintf(dur_suffix, sizeof(dur_suffix), " duration: %.1fs", dur_rounded);
+    const std::string cond_prompt = prompt + dur_suffix;
+
+    if (text_encoder_) {
+        int n_real = text_encoder_->encode(cond_prompt, cond_emb.data(), error);
+        if (n_real < 0) {
+            if (error) *error = std::string("MOSS-SFX-v2: TE encode failed: ") + *error;
+            return false;
+        }
+        std::fprintf(stderr,
+            "[moss_sfx_v2] TE: cond prompt=\"%s\" n_real=%d/%d\n",
+            cond_prompt.c_str(), n_real, kTextLen);
+    } else {
+        std::fprintf(stderr,
+            "[moss_sfx_v2] TE: no-TE path (zero context, T=%d) prompt=\"%s\"\n",
+            T_cond, cond_prompt.c_str());
+    }
+
+    // Debug hook: dump the cond embedding and exit before the DiT loop, for
+    // byte-level parity verification against the Python reference
+    // (encprompt_artifacts/cond_emb.f32). Opt-in via AUDIOCORE_DUMP_TE_EMB.
+    if (const char* dp = std::getenv("AUDIOCORE_DUMP_TE_EMB")) {
+        const std::string path = std::string(dp);
+        std::FILE* f = std::fopen(path.c_str(), "wb");
+        if (f) {
+            std::fwrite(cond_emb.data(), sizeof(float), cond_emb.size(), f);
+            std::fclose(f);
+            std::fprintf(stderr,
+                "[moss_sfx_v2] dumped cond_emb [%zu floats] -> %s\n",
+                cond_emb.size(), path.c_str());
+        }
+        if (error) *error = "TE-only dump completed";
+        return false;  // early exit (skip DiT/VAE)
+    }
 
     // ── 2. Output duration → T_latent ────────────────────────────────────
     // Match Python: always denoise the max_inference_seconds=30 latent, then

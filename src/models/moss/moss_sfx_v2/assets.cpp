@@ -84,6 +84,7 @@ struct DiscoveredPaths {
     fs::path dit;
     fs::path vae;
     fs::path te;
+    fs::path tokenizer_dir;   // dir holding vocab.json + merges.txt + tokenizer_config.json
     bool found = false;
 };
 
@@ -93,6 +94,10 @@ DiscoveredPaths discover_ggufs(const fs::path& model_root) {
         // Single file — treat as the DiT GGUF.
         out.dit = model_root;
         out.found = true;
+        const fs::path parent = model_root.parent_path();
+        if (!parent.empty() && fs::exists(parent / "vocab.json")) {
+            out.tokenizer_dir = parent;
+        }
         return out;
     }
     for (auto& e : fs::directory_iterator(model_root)) {
@@ -112,6 +117,21 @@ DiscoveredPaths discover_ggufs(const fs::path& model_root) {
         }
     }
     out.found = !out.dit.empty();
+
+    // Discover the HF tokenizer files for the Qwen3 text encoder. Accept either
+    // a `tokenizer/` subdirectory or the files sitting next to the GGUFs.
+    auto has_tokenizer = [](const fs::path& dir) {
+        return !dir.empty() && fs::exists(dir / "vocab.json") &&
+               fs::exists(dir / "merges.txt") &&
+               fs::exists(dir / "tokenizer_config.json");
+    };
+    const fs::path tok_subdir = model_root / "tokenizer";
+    if (has_tokenizer(tok_subdir)) {
+        out.tokenizer_dir = tok_subdir;
+    } else if (has_tokenizer(model_root)) {
+        out.tokenizer_dir = model_root;
+    }
+
     return out;
 }
 
@@ -184,6 +204,22 @@ std::shared_ptr<const MossSfxV2Assets> load_moss_sfx_v2_assets(
         cfg.sample_rate     = cfg.vae.sample_rate;
     }
 
+    // ── Parse Qwen3 text-encoder config from the TE GGUF KV (qwen3.*) ─────
+    // Defaults match Qwen3-1.7B; each field is overridden from the file so the
+    // runner stays in lockstep with the actual converted weights.
+    if (!paths.te.empty()) {
+        GgufKv kv(paths.te.string());
+        cfg.te.n_layers   = kv.i32("qwen3.block_count",             cfg.te.n_layers);
+        cfg.te.hidden     = kv.i32("qwen3.embedding_length",         cfg.te.hidden);
+        cfg.te.n_heads    = kv.i32("qwen3.attention.head_count",     cfg.te.n_heads);
+        cfg.te.n_kv_heads = kv.i32("qwen3.attention.head_count_kv",  cfg.te.n_kv_heads);
+        cfg.te.ffn_dim    = kv.i32("qwen3.feed_forward_length",      cfg.te.ffn_dim);
+        cfg.te.rms_eps    = kv.f32("qwen3.attention.layer_norm_rms_epsilon", cfg.te.rms_eps);
+        cfg.te.rope_base  = kv.f32("qwen3.rope.freq_base",           cfg.te.rope_base);
+        const int32_t rope_dims = kv.i32("qwen3.rope.dimension_count", cfg.te.head_dim);
+        cfg.te.head_dim   = rope_dims > 0 ? rope_dims : (cfg.te.hidden / std::max(cfg.te.n_heads, 1));
+    }
+
     assets.config = cfg;
 
     // ── Register tensor sources on the bundle and open them ──────────────
@@ -219,6 +255,7 @@ std::shared_ptr<const MossSfxV2Assets> load_moss_sfx_v2_assets(
     if (!paths.te.empty()) {
         assets.te_weights = assets.resources.open_tensor_source("te_weights");
     }
+    assets.tokenizer_dir = paths.tokenizer_dir;
 
     return std::make_shared<const MossSfxV2Assets>(std::move(assets));
 }
