@@ -7,8 +7,8 @@
 //
 // audiocpp's TensorSource does not expose GGUF KV pairs publicly, so we read
 // the architecture + scheduler scalars directly via gguf_init_from_file (the
-// same C API audiocore's GgufReader uses), and we build the ResourceBundle by
-// scanning the directory — mirroring audiocore's loader.cpp.
+// same C API a standard GGUF reader uses), and we build the ResourceBundle by
+// scanning the directory.
 
 #include "engine/models/moss/moss_sfx_v2/assets.h"
 
@@ -34,7 +34,7 @@ namespace fs = std::filesystem;
 namespace {
 
 // ── Tiny GGUF KV reader (gguf_init_from_file + gguf_get_val_*) ──────────────
-// audiocore's GgufReader equivalent. Reads scalar KV pairs straight out of the
+// Standard GGUF KV reader. Reads scalar KV pairs straight out of the
 // file; only the keys we care about, no tensor data.
 struct GgufKv {
     gguf_context* ctx = nullptr;

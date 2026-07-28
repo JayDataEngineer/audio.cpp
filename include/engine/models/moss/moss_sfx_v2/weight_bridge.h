@@ -2,12 +2,12 @@
 //
 // The ported DiTRunner / VAERunner read weights by name via
 //   ggml_get_tensor(ext_ctx, "moss_sfx_v2.xxx.weight")
-// exactly as audiocore's versions did. audiocore's GgufReader handed them a
-// context whose tensors were mmap'd straight out of the GGUF. audiocpp's
+// exactly as a standard ggml reader does. A standard GGUF reader hands them a
+// context whose tensors are mmap'd straight out of the GGUF. audiocpp's
 // TensorSource is the equivalent front end: it exposes per-tensor raw bytes
 // (in the stored dtype) + PyTorch-convention shape metadata.
 //
-// This bridge mirrors the audiocore loader's materialize step: for every
+// This bridge mirrors a standard GGUF loader's materialize step: for every
 // tensor in `source` whose name starts with `prefix`, allocate a matching
 // ggml_tensor in `ctx`, copy the raw bytes in, and set its name so the
 // runners can find it. The owned buffer storage keeps the bytes alive for the
@@ -53,7 +53,7 @@ struct LoadedWeights {
 //
 // Tensors are reconstructed with their native ggml dtype (BF16/F32/...) and
 // PyTorch-convention shape reversed back to ggml ne[], so the raw GGUF bytes
-// copy in verbatim — byte-identical to audiocore's mmap'd reader.
+// copy in verbatim — byte-identical to a standard mmap'd GGUF reader.
 std::unique_ptr<LoadedWeights> load_weights_into_context(
     const assets::TensorSource& source,
     const std::string& prefix,

@@ -14,7 +14,7 @@
 namespace engine::models::moss_sfx_v2 {
 
 // Offline sound-effect generation session: flow-matching DiT denoising loop →
-// DAC VAE decode → mono PCM. Ported from audiocore's SfxSession.
+// DAC VAE decode → mono PCM.
 //
 //   prepare()  — bridges DiT + VAE GGUF weights into a no_alloc ggml_context
 //                via weight_bridge, then constructs DiTRunner + VAERunner.
@@ -24,7 +24,7 @@ namespace engine::models::moss_sfx_v2 {
 //
 // The Qwen3 text encoder sidecar is optional. When present it feeds the DiT
 // cross-attention; when absent the session falls back to a zero context (the
-// same fallback audiocore uses), which still exercises the full DiT + VAE
+// same fallback path used here), which still exercises the full DiT + VAE
 // pipeline. A real TE is wired in a later phase.
 class MossSfxV2Session final
     : public runtime::RuntimeSessionBase
@@ -45,7 +45,7 @@ public:
     runtime::TaskResult run(const runtime::TaskRequest& request) override;
 
 private:
-    // Ported from audiocore session.cpp run_sfx. Returns mono PCM at the
+    // run_sfx implementation. Returns mono PCM at the
     // configured sample rate.
     bool run_sfx(const std::string& prompt,
                  const std::string& negative_prompt,

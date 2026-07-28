@@ -12,8 +12,8 @@
 
 namespace engine::models::moss_sfx_v2 {
 
-// Scheduler parameters parsed from the DiT GGUF KV metadata. Ported from
-// audiocore's SfxConfig scheduler fields; matches FlowMatchScheduler in
+// Scheduler parameters parsed from the DiT GGUF KV metadata. Mirrors the
+// SfxConfig scheduler fields; matches FlowMatchScheduler in
 // moss_soundeffect_v2/diffsynth/schedulers/flow_match.py.
 struct SfxSchedulerConfig {
     int32_t shift                 = 5;

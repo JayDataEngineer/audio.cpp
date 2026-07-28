@@ -1,8 +1,8 @@
 // session.cpp — MOSS-SoundEffect-v2 offline generation session.
 //
-// Ports audiocore's SfxSession (run_sfx flow-matching loop) onto audiocpp's
-// RuntimeSessionBase. The DiT + VAE graph logic is unchanged (verbatim from
-// audiocore); only the request/response plumbing + weight front-end differ.
+// SfxSession run_sfx flow-matching loop on audiocpp's RuntimeSessionBase. The
+// DiT + VAE graph logic is verbatim from the reference implementation; only the
+// request/response plumbing + weight front-end differ.
 
 #include "engine/models/moss/moss_sfx_v2/session.h"
 
@@ -126,7 +126,7 @@ void MossSfxV2Session::prepare(const runtime::SessionPreparationRequest& /*reque
     // Optional Qwen3 text-encoder sidecar. Built only when the TE GGUF is
     // present AND the HF tokenizer files (vocab/merges/tokenizer_config) are
     // discoverable. When absent, run_sfx falls back to a zero context — the
-    // same path audiocore's broken TE effectively exercised.
+    // same path a missing/broken TE effectively exercises.
     if (assets_->te_weights) {
         te_weights_ = load_weights_into_context(
             *assets_->te_weights, /*prefix=*/"",
@@ -156,7 +156,7 @@ void MossSfxV2Session::prepare(const runtime::SessionPreparationRequest& /*reque
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  Flow-matching Euler schedule (ported from audiocore build_schedule)
+//  Flow-matching Euler schedule (build_schedule)
 // ═══════════════════════════════════════════════════════════════════════════
 
 struct FlowSchedule {
@@ -196,7 +196,7 @@ static FlowSchedule build_schedule(int num_steps, float shift,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  run_sfx — the denoising pipeline (ported from audiocore session.cpp)
+//  run_sfx — the denoising pipeline
 // ═══════════════════════════════════════════════════════════════════════════
 
 bool MossSfxV2Session::run_sfx(

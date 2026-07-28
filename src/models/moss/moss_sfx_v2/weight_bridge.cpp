@@ -1,6 +1,6 @@
 // weight_bridge.cpp — see weight_bridge.h.
 //
-// Mirrors audiocore's GgufReader::materialize step: take audiocpp's TensorSource
+// Mirrors a standard GGUF reader's materialize step: take audiocpp's TensorSource
 // (which exposes raw GGUF bytes + PyTorch-convention shape metadata per tensor)
 // and populate a no_alloc ggml_context whose tensors carry the same names, dtype,
 // and ne[] layout the ported DiTRunner/VAERunner expect from ggml_get_tensor().
