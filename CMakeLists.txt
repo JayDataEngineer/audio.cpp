@@ -330,6 +330,12 @@ add_library(engine_runtime STATIC
     src/models/miotts/loader.cpp
     src/models/moss/moss_tts_local/assets.cpp
     src/models/moss/moss_tts_local/backbone.cpp
+    src/models/moss/moss_sfx_v2/assets.cpp
+    src/models/moss/moss_sfx_v2/dit_runner.cpp
+    src/models/moss/moss_sfx_v2/loader.cpp
+    src/models/moss/moss_sfx_v2/session.cpp
+    src/models/moss/moss_sfx_v2/vae_runner.cpp
+    src/models/moss/moss_sfx_v2/weight_bridge.cpp
     src/models/moss/moss_tts_nano/assets.cpp
     src/models/moss/moss_tts_nano/generator.cpp
     src/models/moss/moss_tts_nano/global_transformer.cpp
@@ -699,6 +705,14 @@ if (ENGINE_ENABLE_OPENMP)
     target_link_libraries(audiocpp_gguf PRIVATE OpenMP::OpenMP_CXX)
 endif()
 
+# Standalone ECAPA-TDNN speaker-encoder converter: HuggingFace safetensors → GGUF.
+# Produces the speaker-encoder sidecar used by Qwen3SpeakerEncoderRuntime for
+# voice-cloning with Qwen3-TTS. See tools/convert_ecapa.cpp for full docs.
+add_executable(convert_ecapa
+    tools/convert_ecapa.cpp
+)
+target_link_libraries(convert_ecapa PRIVATE engine_runtime ggml)
+
 add_executable(model_perf
     tests/perf/model_perf.cpp
     app/cli/args.cpp
@@ -794,6 +808,7 @@ if (ENGINE_BUILD_WARMBENCH)
     add_engine_warmbench(marblenet_vad_warm_bench tests/marblenet_vad/marblenet_vad_warm_bench.cpp)
     add_engine_warmbench(miocodec_warm_bench tests/miocodec/miocodec_warm_bench.cpp)
     add_engine_warmbench(moss_tts_nano_warm_bench tests/moss_tts_nano/moss_tts_nano_warm_bench.cpp)
+    add_engine_warmbench(moss_sfx_v2_warm_bench tests/moss_sfx_v2/moss_sfx_v2_warm_bench.cpp)
     add_engine_warmbench(moss_tts_local_warm_bench tests/moss_tts_local/moss_tts_local_warm_bench.cpp)
     add_engine_warmbench(nemotron_asr_warm_bench tests/nemotron_asr/nemotron_asr_warm_bench.cpp)
     add_engine_warmbench(omnivoice_warm_bench tests/omnivoice/omnivoice_warm_bench.cpp)

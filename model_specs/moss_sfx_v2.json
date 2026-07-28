@@ -1,0 +1,132 @@
+{
+  "family": "moss_sfx_v2",
+  "display_name": "MOSS-SoundEffect-v2",
+  "description": "MOSS Sound Effect v2 — 1.3B DiT (WanAudioModel, 30 layers) with a DAC VAE decoder and flow-matching Euler schedule. Generates sound effects from a text prompt. Text conditioning comes from a Qwen3-Embedding text encoder sidecar.",
+  "category": "audio_generation",
+  "status": "supported",
+  "tasks": [
+    "sfx"
+  ],
+  "modes": [
+    "offline"
+  ],
+  "languages": [
+    "en"
+  ],
+  "capabilities": {},
+  "options": {
+    "request": [
+      {
+        "name": "duration_sec",
+        "type": "float",
+        "description": "Target output duration in seconds; the pipeline always denoises a 30s latent then crops to this length. Default 10s.",
+        "required": false,
+        "min": 0.0,
+        "default": 10.0
+      },
+      {
+        "name": "num_inference_steps",
+        "type": "int",
+        "description": "Flow-matching denoising steps; default 50.",
+        "required": false,
+        "min": 1,
+        "default": 50
+      },
+      {
+        "name": "guidance_scale",
+        "type": "float",
+        "description": "Classifier-free guidance scale; default 5.0.",
+        "required": false,
+        "min": 0.0,
+        "default": 5.0
+      },
+      {
+        "name": "seed",
+        "type": "int",
+        "description": "Noise seed; 0 uses a fixed default (42).",
+        "required": false,
+        "min": 0,
+        "default": 42
+      },
+      {
+        "name": "negative_prompt",
+        "type": "string",
+        "description": "Unconditional/negative prompt for CFG; empty by default.",
+        "required": false,
+        "default": ""
+      }
+    ],
+    "session": [
+      {
+        "name": "weight_type",
+        "type": "enum",
+        "description": "DiT weight storage type.",
+        "values": [
+          "auto",
+          "native",
+          "f32",
+          "f16",
+          "bf16"
+        ],
+        "required": false,
+        "default": "auto"
+      }
+    ],
+    "load": []
+  },
+  "runtime": {
+    "tags": [
+      "gguf"
+    ]
+  },
+  "sources": [
+    {
+      "format": "gguf",
+      "roots": {
+        "model": ".",
+        "weights": "$gguf"
+      },
+      "files": {
+        "config": "model:config.json"
+      },
+      "tensors": {
+        "dit_weights": {
+          "source": "weights:",
+          "prefix": "moss_sfx_v2"
+        },
+        "vae_weights": {
+          "source": "weights:",
+          "prefix": "moss_sfx_v2.vae"
+        },
+        "te_weights": {
+          "source": "weights:",
+          "prefix": "te",
+          "required": false
+        }
+      }
+    }
+  ],
+  "package_defaults": {
+    "download": {
+      "kind": "huggingface_snapshot",
+      "repo": "anomalyco/mse2-gguf",
+      "revision": "main",
+      "gated": false
+    }
+  },
+  "packages": [
+    {
+      "id": "moss_sfx_v2_bf16",
+      "display_name": "MOSS-SoundEffect-v2 BF16 GGUF",
+      "default": true,
+      "format": "gguf",
+      "precision": "bf16",
+      "target_directory": "MOSS-SFX-v2-GGUF",
+      "files": [
+        "MOSS-SFX-v2-GGUF/mse2-dit-bf16.gguf",
+        "MOSS-SFX-v2-GGUF/mse2-vae-bf16.gguf"
+      ],
+      "strip_prefix": "MOSS-SFX-v2-GGUF"
+    }
+  ]
+}
