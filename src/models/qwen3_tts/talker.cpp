@@ -23,6 +23,7 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -418,22 +419,58 @@ PromptEmbeddingState build_prompt_state(
     std::vector<float> custom_voice_speaker_embed;
     std::string language = ascii_lower(prefill.language);
     if (prefill.prompt_mode == Qwen3TalkerPromptMode::CustomVoice) {
-        const std::string speaker = ascii_lower(prefill.speaker);
-        const auto speaker_it = config.speaker_id.find(speaker);
-        if (speaker_it == config.speaker_id.end()) {
-            throw std::runtime_error("Qwen3 custom voice unsupported speaker: " + prefill.speaker);
+        if (prefill.speaker_embedding.has_value() &&
+            prefill.speaker_embedding->dims == config.hidden_size) {
+            // Voice embedding injection: scale ECAPA embedding norm to match the
+            // model's preset speaker token norms (ECAPA ~17 vs CustomVoice ~14.5 on 1.7B).
+            // Without scaling the embedding overpowers token conditioning and the
+            // voice sounds muffled/wrong.
+            // Reference: gabriele-mastrapasqua/qwen3-tts (pure C) qwen_tts.c lines 1182-1209.
+            constexpr int32_t SPK_RYAN = 3061;
+            const auto & spk_vals = prefill.speaker_embedding->values;
+            float emb_norm_sq = 0.0F;
+            for (const auto v : spk_vals) emb_norm_sq += v * v;
+            const float emb_norm = std::sqrt(emb_norm_sq);
+
+            const auto ref_row = lookup_rows(weights.codec_embedding, config.hidden_size, {SPK_RYAN});
+            float ref_norm_sq = 0.0F;
+            for (const auto v : ref_row) ref_norm_sq += v * v;
+            const float ref_norm = std::sqrt(ref_norm_sq);
+
+            // Match C reference (qwen_tts.c:1182-1209) exactly:
+            //   scale = (ref_norm > 0.1 && emb_norm > 0.1) ? ref_norm / emb_norm : 1.0
+            // On Base model, token 3061 norm ≈ 0.023 (< 0.1) → scale = 1.0 (raw embedding).
+            // On CustomVoice, token 3061 norm ≈ 13.89 (> 0.1) → scale = ref_norm / emb_norm.
+            float spk_scale =
+                (ref_norm > 0.1F && emb_norm > 0.1F) ? ref_norm / emb_norm : 1.0F;
+            // QWEN_SPK_SCALE env var for tuning embedding strength (matches C implementation).
+            if (const char * sse = std::getenv("QWEN_SPK_SCALE"); sse != nullptr && sse[0] != '\0') {
+                spk_scale *= std::strtof(sse, nullptr);
+            }
+            debug::trace_log_scalar("qwen3_tts.custom_voice.emb_norm", static_cast<double>(emb_norm));
+            debug::trace_log_scalar("qwen3_tts.custom_voice.ref_norm", static_cast<double>(ref_norm));
+            debug::trace_log_scalar("qwen3_tts.custom_voice.spk_scale", static_cast<double>(spk_scale));
+
+            custom_voice_speaker_embed.reserve(spk_vals.size());
+            for (const auto v : spk_vals) custom_voice_speaker_embed.push_back(v * spk_scale);
+        } else {
+            const std::string speaker = ascii_lower(prefill.speaker);
+            const auto speaker_it = config.speaker_id.find(speaker);
+            if (speaker_it == config.speaker_id.end()) {
+                throw std::runtime_error("Qwen3 custom voice unsupported speaker: " + prefill.speaker);
+            }
+            const auto dialect_it = config.speaker_dialect.find(speaker);
+            if (dialect_it == config.speaker_dialect.end()) {
+                throw std::runtime_error("Qwen3 custom voice missing dialect entry for speaker: " + prefill.speaker);
+            }
+            if ((language == "chinese" || language == "auto") && dialect_it->second.has_value()) {
+                language = *dialect_it->second;
+            }
+            custom_voice_speaker_embed = lookup_rows(
+                weights.codec_embedding,
+                config.hidden_size,
+                {static_cast<int32_t>(speaker_it->second)});
         }
-        const auto dialect_it = config.speaker_dialect.find(speaker);
-        if (dialect_it == config.speaker_dialect.end()) {
-            throw std::runtime_error("Qwen3 custom voice missing dialect entry for speaker: " + prefill.speaker);
-        }
-        if ((language == "chinese" || language == "auto") && dialect_it->second.has_value()) {
-            language = *dialect_it->second;
-        }
-        custom_voice_speaker_embed = lookup_rows(
-            weights.codec_embedding,
-            config.hidden_size,
-            {static_cast<int32_t>(speaker_it->second)});
     }
 
     std::vector<int32_t> codec_prefix;
@@ -524,7 +561,7 @@ PromptEmbeddingState build_prompt_state(
     if (!prefill.speaker_embedding.has_value() || prefill.speaker_embedding->dims != config.hidden_size) {
         throw std::runtime_error("Qwen3 talker voice clone prefill requires speaker embedding");
     }
-    if (!prefill.reference_codes.has_value() || prefill.reference_ids.empty()) {
+    if (prefill.icl_mode && (!prefill.reference_codes.has_value() || prefill.reference_ids.empty())) {
         throw std::runtime_error("Qwen3 talker ICL prefill requires reference ids and codes");
     }
 
@@ -534,7 +571,43 @@ PromptEmbeddingState build_prompt_state(
     append_rows(state.prompt, text_project_host(lookup_rows(weights.text_embedding, config.text_hidden_size, role_ids), 3, weights, config));
 
     auto codec_embed = lookup_rows(weights.codec_embedding, config.hidden_size, codec_prefix);
-    append_row(codec_embed, prefill.speaker_embedding->values);
+    {
+        // Scale speaker embedding norm to match the model's preset speaker token norms.
+        // ECAPA embeddings (~17) and CustomVoice codec embedding table speaker tokens
+        // (~14–16) have different norm ranges. Without scaling, the raw embedding
+        // overpowers token conditioning and the voice sounds muffled/wrong.
+        // Reference: gabriele-mastrapasqua/qwen3-tts (pure C) qwen_tts.c lines 1182-1209.
+        constexpr int32_t SPK_RYAN = 3061;
+        const auto & spk_vals = prefill.speaker_embedding->values;
+        float emb_norm_sq = 0.0F;
+        for (const auto v : spk_vals) emb_norm_sq += v * v;
+        const float emb_norm = std::sqrt(emb_norm_sq);
+
+        const auto ref_row = lookup_rows(weights.codec_embedding, config.hidden_size, {SPK_RYAN});
+        float ref_norm_sq = 0.0F;
+        for (const auto v : ref_row) ref_norm_sq += v * v;
+        const float ref_norm = std::sqrt(ref_norm_sq);
+
+        // Match C reference (qwen_tts.c:1182-1209) exactly:
+        //   scale = (ref_norm > 0.1 && emb_norm > 0.1) ? ref_norm / emb_norm : 1.0
+        // On Base model, token 3061 norm ≈ 0.023 (< 0.1) → scale = 1.0 (raw embedding).
+        // On CustomVoice, token 3061 norm ≈ 13.89 (> 0.1) → scale = ref_norm / emb_norm.
+        float spk_scale =
+            (ref_norm > 0.1F && emb_norm > 0.1F) ? ref_norm / emb_norm : 1.0F;
+        // QWEN_SPK_SCALE env var for tuning embedding strength (matches C implementation).
+        // <1.0 loosens identity for emotion, >1.0 tightens.
+        if (const char * sse = std::getenv("QWEN_SPK_SCALE"); sse != nullptr && sse[0] != '\0') {
+            spk_scale *= std::strtof(sse, nullptr);
+        }
+        debug::trace_log_scalar("qwen3_tts.voice_clone.emb_norm", static_cast<double>(emb_norm));
+        debug::trace_log_scalar("qwen3_tts.voice_clone.ref_norm", static_cast<double>(ref_norm));
+        debug::trace_log_scalar("qwen3_tts.voice_clone.spk_scale", static_cast<double>(spk_scale));
+
+        std::vector<float> scaled_spk;
+        scaled_spk.reserve(spk_vals.size());
+        for (const auto v : spk_vals) scaled_spk.push_back(v * spk_scale);
+        append_row(codec_embed, scaled_spk);
+    }
     append_rows(codec_embed, lookup_rows(
                                  weights.codec_embedding,
                                  config.hidden_size,
@@ -547,6 +620,35 @@ PromptEmbeddingState build_prompt_state(
                           codec_embed.begin(),
                           codec_embed.begin() + static_cast<std::ptrdiff_t>((codec_rows - 2) * config.hidden_size))));
     append_row(state.prompt, add_rows(tts_bos, row_at(codec_embed, codec_rows - 2, config.hidden_size)));
+
+    if (!prefill.icl_mode) {
+        // SpeakerEmbeddingOnly (x_vector_only_mode): ALL text tokens + tts_eos go in
+        // the prefill, each paired with codec_pad. Then a final tts_pad + codec_bos.
+        // Matches gabriele-mastrapasqua/qwen3-tts qwen_tts.c lines 1272-1294 (non-ICL).
+        const std::vector<int32_t> text_ids(prefill.input_ids.begin() + 3, prefill.input_ids.end() - 5);
+        auto text_embed = text_project_host(
+            lookup_rows(weights.text_embedding, config.text_hidden_size, text_ids),
+            static_cast<int64_t>(text_ids.size()),
+            weights,
+            config);
+        append_row(text_embed, tts_eos);
+        append_rows(
+            state.prompt,
+            add_rows(
+                text_embed,
+                lookup_rows(
+                    weights.codec_embedding,
+                    config.hidden_size,
+                    std::vector<int32_t>(
+                        static_cast<size_t>(text_ids.size()) + 1,
+                        static_cast<int32_t>(config.codec_pad_id)))));
+        append_row(
+            state.prompt,
+            add_rows(
+                tts_pad,
+                row_at(codec_embed, codec_rows - 1, config.hidden_size)));
+        return state;
+    }
 
     const std::vector<int32_t> text_ids(prefill.input_ids.begin() + 3, prefill.input_ids.end() - 5);
     const std::vector<int32_t> ref_text_ids(prefill.reference_ids.begin() + 3, prefill.reference_ids.end() - 2);

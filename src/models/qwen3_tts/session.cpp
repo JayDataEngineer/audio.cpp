@@ -8,6 +8,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -313,6 +315,16 @@ Qwen3TTSSession::Qwen3TTSSession(
             voice_prompt_context_,
             speaker_encoder_graph_arena_bytes_,
             conv_weight_storage_type_);
+    } else if (assets_->config.variant == Qwen3TTSVariant::CustomVoice) {
+        // CustomVoice supports voice embedding injection: the ECAPA-TDNN speaker
+        // encoder extracts an identity vector from reference audio, which replaces
+        // the preset speaker token in the codec prefix (scaled to match norms).
+        // Reference: gabriele-mastrapasqua/qwen3-tts qwen_tts.c lines 1025-1048, 1182-1209.
+        speaker_encoder_ = std::make_unique<Qwen3SpeakerEncoderRuntime>(
+            assets_,
+            voice_prompt_context_,
+            speaker_encoder_graph_arena_bytes_,
+            conv_weight_storage_type_);
     }
 }
 
@@ -392,11 +404,23 @@ runtime::TaskResult Qwen3TTSSession::run(const runtime::TaskRequest & request) {
         double prefill_ms = 0.0;
         double talker_ms = 0.0;
         double decoder_ms = 0.0;
+        double prompt_ms = 0.0;
         runtime::AudioBuffer merged_audio;
         for (const auto & chunk_request : chunk_requests) {
             const Qwen3TTSRequest qwen_request = make_request(chunk_request);
             const auto prefill_start = Clock::now();
-            const auto prefill = prompt_builder.build_prefill(qwen_request);
+            auto prefill = prompt_builder.build_prefill(qwen_request);
+            // Voice embedding injection: when reference audio is provided, extract the
+            // ECAPA-TDNN speaker embedding and attach it to the CustomVoice prefill.
+            // The talker will scale it and replace the preset speaker token in the
+            // codec prefix, enabling custom voice identity on the instruct model.
+            // Reference: gabriele-mastrapasqua/qwen3-tts qwen_tts.c lines 1182-1209.
+            if (qwen_request.voice_clone.has_value() && speaker_encoder_ != nullptr) {
+                const auto prompt_start = Clock::now();
+                prefill.speaker_embedding = speaker_encoder_->encode(
+                    qwen_request.voice_clone->reference_audio);
+                prompt_ms += engine::debug::elapsed_ms(prompt_start, Clock::now());
+            }
             prefill_ms += engine::debug::elapsed_ms(prefill_start, Clock::now());
             const auto talker_start = Clock::now();
             const auto codes = talker_step_->generate(
@@ -414,6 +438,7 @@ runtime::TaskResult Qwen3TTSSession::run(const runtime::TaskRequest & request) {
         runtime::TaskResult result;
         result.audio_output = std::move(merged_audio);
         debug::timing_log_scalar("qwen3_tts.custom_voice_prefill_build_ms", prefill_ms);
+        debug::timing_log_scalar("qwen3_tts.custom_voice_prompt_ms", prompt_ms);
         debug::timing_log_scalar("qwen3_tts.talker_ms", talker_ms);
         debug::timing_log_scalar("qwen3_tts.speech_decoder_ms", decoder_ms);
         debug::timing_log_scalar("session.wall_ms", engine::debug::elapsed_ms(wall_start, Clock::now()));
@@ -444,21 +469,33 @@ runtime::TaskResult Qwen3TTSSession::run(const runtime::TaskRequest & request) {
         const auto prefill_start = Clock::now();
         const auto prefill = prompt_builder.build_prefill(qwen_request, voice_prompt);
         prefill_ms += engine::debug::elapsed_ms(prefill_start, Clock::now());
-        if (!voice_prompt.reference_codes.has_value()) {
-            throw std::runtime_error("Qwen3 base TTS talker currently requires ICL reference codes");
-        }
         const auto talker_start = Clock::now();
         const auto codes = talker_step_->generate(
             prefill,
             qwen_request.generation,
             qwen_request.generation.repetition_penalty);
         talker_ms += engine::debug::elapsed_ms(talker_start, Clock::now());
+        // Dump greedy code0 per frame for 1:1 comparison with C reference.
+        if (const char * dump = std::getenv("ACPP_DUMP_CODE0"); dump != nullptr && dump[0] != '\0') {
+            if (FILE * fp = std::fopen(dump, "w")) {
+                for (int64_t f = 0; f < codes.generated_codes.frames; ++f) {
+                    std::fprintf(fp, "%d\n", codes.generated_codes.codes[static_cast<size_t>(f * codes.generated_codes.code_groups)]);
+                }
+                std::fclose(fp);
+            }
+        }
         const auto decoder_start = Clock::now();
-        runtime::append_audio_buffer(
-            merged_audio,
-            speech_decoder_->decode_and_trim_reference(
-                *voice_prompt.reference_codes,
-                codes.generated_codes));
+        if (voice_prompt.reference_codes.has_value()) {
+            runtime::append_audio_buffer(
+                merged_audio,
+                speech_decoder_->decode_and_trim_reference(
+                    *voice_prompt.reference_codes,
+                    codes.generated_codes));
+        } else {
+            runtime::append_audio_buffer(
+                merged_audio,
+                speech_decoder_->decode(codes.generated_codes));
+        }
         decoder_ms += engine::debug::elapsed_ms(decoder_start, Clock::now());
     }
     release_talker_cached_step_graph();
@@ -592,6 +629,25 @@ Qwen3TTSRequest Qwen3TTSSession::make_request(const runtime::TaskRequest & reque
             }
         }
         out.custom_voice = std::move(custom_voice);
+        // Voice embedding injection: when reference audio is provided alongside
+        // CustomVoice, extract the ECAPA speaker embedding. The talker replaces the
+        // preset speaker token with the scaled embedding, enabling custom voice
+        // identity on the instruct model.
+        // Reference: gabriele-mastrapasqua/qwen3-tts qwen_tts.c lines 1025-1048.
+        const runtime::AudioBuffer * reference_audio = nullptr;
+        if (request.voice.has_value()
+            && request.voice->speaker.has_value()
+            && request.voice->speaker->audio.has_value()) {
+            reference_audio = &*request.voice->speaker->audio;
+        } else if (request.audio_input.has_value()) {
+            reference_audio = &*request.audio_input;
+        }
+        if (reference_audio != nullptr) {
+            Qwen3VoiceCloneInput voice_clone;
+            voice_clone.reference_audio = *reference_audio;
+            voice_clone.mode = Qwen3VoiceCloneMode::SpeakerEmbeddingOnly;
+            out.voice_clone = std::move(voice_clone);
+        }
     }
     return out;
 }

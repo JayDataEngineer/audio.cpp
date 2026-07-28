@@ -31,8 +31,10 @@ Qwen3TalkerPrefill Qwen3TTSCustomVoicePromptBuilder::build_prefill(const Qwen3TT
     if (!request.custom_voice.has_value()) {
         throw std::runtime_error("Qwen3 custom voice prefill requires custom voice input");
     }
-    if (request.custom_voice->speaker.empty()) {
-        throw std::runtime_error("Qwen3 custom voice prefill requires speaker");
+    // Speaker name is optional when a voice embedding (reference audio) is provided.
+    // The talker uses the scaled ECAPA embedding to replace the speaker token.
+    if (request.custom_voice->speaker.empty() && !request.voice_clone.has_value()) {
+        throw std::runtime_error("Qwen3 custom voice prefill requires speaker or voice reference");
     }
     Qwen3TalkerPrefill prefill;
     prefill.prompt_mode = Qwen3TalkerPromptMode::CustomVoice;
