@@ -334,6 +334,7 @@ add_library(engine_runtime STATIC
     src/models/moss/moss_sfx_v2/dit_runner.cpp
     src/models/moss/moss_sfx_v2/loader.cpp
     src/models/moss/moss_sfx_v2/session.cpp
+    src/models/moss/moss_sfx_v2/text_encoder.cpp
     src/models/moss/moss_sfx_v2/vae_runner.cpp
     src/models/moss/moss_sfx_v2/weight_bridge.cpp
     src/models/moss/moss_tts_nano/assets.cpp

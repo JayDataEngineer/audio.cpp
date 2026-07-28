@@ -18,6 +18,7 @@
 #include "engine/models/marblenet_vad/session.h"
 #include "engine/models/miocodec/loader.h"
 #include "engine/models/miotts/loader.h"
+#include "engine/models/moss/moss_sfx_v2/loader.h"
 #include "engine/models/moss/moss_tts_local/loader.h"
 #include "engine/models/moss/moss_tts_nano/loader.h"
 #include "engine/models/nemotron_asr/loader.h"
@@ -250,6 +251,7 @@ ModelRegistry make_default_registry(const std::optional<std::filesystem::path> &
         engine::models::outetts::make_outetts_loader(),
         engine::models::miocodec::make_miocodec_loader(),
         engine::models::miotts::make_miotts_loader(),
+        engine::models::moss_sfx_v2::make_moss_sfx_v2_loader(),
         engine::models::moss_tts_local::make_moss_tts_local_loader(),
         engine::models::moss_tts_nano::make_moss_tts_nano_loader(),
         engine::models::voxcpm2::make_voxcpm2_loader(),
