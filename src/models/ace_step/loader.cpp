@@ -16,16 +16,20 @@ AceStepModelSelection selection_from_request(const runtime::ModelLoadRequest & r
     AceStepModelSelection selection;
     if (const auto it = request.options.find("ace_step.dit_model_path"); it != request.options.end()) {
         selection.dit_model_path = it->second;
-        return selection;
+    } else {
+        std::string model_name = request.model_path.filename().generic_string();
+        std::transform(model_name.begin(), model_name.end(), model_name.begin(), [](unsigned char ch) {
+            return static_cast<char>(std::tolower(ch));
+        });
+        if (model_name.find("base") != std::string::npos) {
+            selection.dit_model_path = "acestep-v15-base";
+        } else if (model_name.find("turbo") != std::string::npos) {
+            selection.dit_model_path = "acestep-v15-turbo";
+        }
     }
-    std::string model_name = request.model_path.filename().generic_string();
-    std::transform(model_name.begin(), model_name.end(), model_name.begin(), [](unsigned char ch) {
-        return static_cast<char>(std::tolower(ch));
-    });
-    if (model_name.find("base") != std::string::npos) {
-        selection.dit_model_path = "acestep-v15-base";
-    } else if (model_name.find("turbo") != std::string::npos) {
-        selection.dit_model_path = "acestep-v15-turbo";
+    // VAE override: ace_step.vae_path loads a specific VAE GGUF (e.g., ScragVAE).
+    if (const auto it = request.options.find("ace_step.vae_path"); it != request.options.end()) {
+        selection.vae_path = it->second;
     }
     return selection;
 }
@@ -90,6 +94,7 @@ runtime::ModelCliInterface cli(const AceStepAssets &) {
     };
     out.load_options = {
         {"ace_step.dit_model_path", "acestep-v15-turbo|acestep-v15-base", "DiT variant inside the model package."},
+        {"ace_step.vae_path", "path", "Override VAE GGUF path (e.g. ScragVAE swap-in)."},
     };
     return out;
 }

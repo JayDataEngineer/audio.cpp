@@ -14,6 +14,7 @@ namespace engine::models::ace_step {
 
 struct AceStepModelSelection {
     std::string dit_model_path = "acestep-v15-turbo";
+    std::string vae_path;  // override for the VAE GGUF (e.g., ScragVAE swap-in)
 };
 
 struct AceStepPlannerConfig {

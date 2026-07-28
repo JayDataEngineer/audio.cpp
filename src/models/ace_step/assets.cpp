@@ -174,6 +174,19 @@ std::shared_ptr<const AceStepAssets> load_ace_step_assets(
         assets->resources.open_tensor_source(dit_resource_id(assets->selection, "silence_latent"));
     assets->lm_weights = assets->resources.open_tensor_source("lm_weights");
     assets->text_encoder_weights = assets->resources.open_tensor_source("text_encoder_weights");
+    // VAE path override (ScragVAE swap-in): if the selection carries a path,
+    // replace the package-spec VAE source so open_tensor_source picks it up.
+    if (!selection.vae_path.empty()) {
+        if (!std::filesystem::exists(selection.vae_path)) {
+            std::fprintf(stderr, "[ace_step] WARNING: vae_path override '%s' "
+                                 "does not exist — falling back to default VAE\n",
+                         selection.vae_path.c_str());
+        } else {
+            assets->resources.add_tensor_source("vae_weights", selection.vae_path);
+            std::fprintf(stderr, "[ace_step] VAE overridden: %s\n",
+                         selection.vae_path.c_str());
+        }
+    }
     assets->vae_weights = assets->resources.open_tensor_source("vae_weights");
     return assets;
 }
