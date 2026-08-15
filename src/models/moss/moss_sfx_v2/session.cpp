@@ -343,7 +343,12 @@ bool MossSfxV2Session::run_sfx(
     // ── 6. VAE decode → PCM mono ─────────────────────────────────────────
     const int32_t T_audio = T_latent * up;
     pcm_out->resize(static_cast<size_t>(T_audio));
-    constexpr int32_t kVaeChunkLatent = 500;  // ≤10s/chunk fits 24 GB VRAM
+    constexpr int32_t kVaeChunkLatent = 128;  // VAE decode chunk (latent frames). With the
+                                            // gallocr allocator, peak VRAM is liveness-based
+                                            // (chunk size no longer drives OOM), so this only
+                                            // trades graph-build count vs per-chunk latency:
+                                            // 12 chunks per 30s latent. 500 works too; 128 is
+                                            // the value proven with gallocr (2026-08-06).
     {
         auto v0 = std::chrono::steady_clock::now();
         const int n_chunks =

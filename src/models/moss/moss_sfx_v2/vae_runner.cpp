@@ -11,6 +11,7 @@
 #include "ggml.h"
 #include "ggml-cpu.h"
 #include "ggml-backend.h"
+#include "ggml-alloc.h"
 
 #include <algorithm>
 #include <cmath>
@@ -949,10 +950,18 @@ static bool run_sub_graph(
     // We bypass the scheduler entirely: the scheduler's INPUT flag handling
     // forces inputs to the last backend (CPU), preventing CUDA offload.
     // By allocating directly on CUDA, all ops run on GPU.
+    // gallocr = liveness-based allocation, unlike alloc_ctx_tensors which
+    // packed EVERY intermediate into one contiguous CUDA buffer (sum scales
+    // with the upsampled block resolution: 1.4-1.8GB — OOM on 24GB with
+    // DiT+TE resident ~23.2GB). gallocr reuses buffers across non-overlapping
+    // lifetimes: peak ~max-live (~150MB). Scheduler bypassed, not gallocr:
+    // the scheduler's INPUT handling would force inputs to CPU; gallocr is
+    // pure buffer planning on the given buft, no backend juggling.
     auto _t0 = ggml_time_us();
-    ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors(ctx, cuda_backend);
-    if (!buf) {
-        if (error) *error = std::string(label) + ": CUDA alloc_ctx_tensors failed";
+    ggml_gallocr_t gallocr = ggml_gallocr_new(ggml_backend_get_default_buffer_type(cuda_backend));
+    if (!gallocr || !ggml_gallocr_alloc_graph(gallocr, gf)) {
+        if (error) *error = std::string(label) + ": gallocr alloc failed";
+        if (gallocr) ggml_gallocr_free(gallocr);
         ggml_free(ctx);
         return false;
     }
@@ -984,7 +993,7 @@ static bool run_sub_graph(
             (int)((_t3-_t2)/1000), (int)((_t4-_t3)/1000),
             (size_t)ggml_graph_n_nodes(gf));
 
-    ggml_backend_buffer_free(buf);
+    ggml_gallocr_free(gallocr);
     ggml_free(ctx);
     return true;
 }
