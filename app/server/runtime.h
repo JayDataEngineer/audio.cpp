@@ -131,7 +131,8 @@ private:
     TimedTaskResult run_model(
         LoadedModel & model,
         const engine::runtime::TaskRequest & request,
-        std::optional<int> busy_timeout_ms = std::nullopt);
+        std::optional<int> busy_timeout_ms = std::nullopt,
+        engine::runtime::ProgressCallback progress = {});
     TimedTaskResult run_streaming_model(
         LoadedModel & model,
         const engine::runtime::TaskRequest & request,
@@ -158,6 +159,14 @@ private:
         const engine::runtime::TaskRequest & request,
         const engine::io::json::Value & body);
     HttpResponse handle_speech_live(const HttpRequest & request);
+    // Offline speech with live progress: emits ``progress`` SSE events fed by
+    // the model session's progress callback, then a final ``speech.complete``
+    // carrying the base64 WAV. Used by ComfyUI's audiocore wrapper
+    // (stream_progress=true) to surface real per-chunk TTS progress.
+    HttpResponse handle_speech_progress_stream(
+        LoadedModel & model,
+        const engine::runtime::TaskRequest & request,
+        const engine::io::json::Value & body);
     HttpResponse handle_transcription(const HttpRequest & request);
     HttpResponse handle_transcription_json(const std::string & body_text);
     HttpResponse handle_transcription_multipart(const std::string & body_text, const std::string & boundary);
@@ -172,6 +181,10 @@ private:
     HttpResponse handle_transcription_live(const HttpRequest & request);
     HttpResponse handle_generic_run(const std::string & body_text);
     HttpResponse handle_generic_stream(const std::string & body_text);
+    HttpResponse handle_generic_progress_stream(
+        LoadedModel & model,
+        const engine::runtime::TaskRequest & request,
+        const engine::io::json::Value & body);
     HttpResponse handle_voices(const HttpRequest & request) const;
     HttpResponse handle_unload_models(const std::string & body_text);
     HttpResponse handle_unload_all_models();

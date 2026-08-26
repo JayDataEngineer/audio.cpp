@@ -80,7 +80,11 @@ TextEncoderRunner::TextEncoderRunner(
     : ext_ctx_(te_ctx), cfg_(cfg), tokenizer_(std::move(tokenizer)) {}
 
 TextEncoderRunner::~TextEncoderRunner() {
-    if (migrated_buf_) ggml_backend_buffer_free(migrated_buf_);
+    if (migrated_buf_) {
+        ggml_backend_buffer_free(migrated_buf_);
+        migrated_buf_ = nullptr;
+        std::fprintf(stderr, "[MSE2-TE] text encoder destroyed: migrated weights freed\n");
+    }
 }
 
 bool TextEncoderRunner::ensure_backend(std::string* error) {

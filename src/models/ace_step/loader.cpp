@@ -27,8 +27,11 @@ AceStepModelSelection selection_from_request(const runtime::ModelLoadRequest & r
         return static_cast<char>(std::tolower(ch));
     });
     const bool xl = model_name.find("xl") != std::string::npos;
-    if (model_name.find("base") != std::string::npos || model_name.find("sft") != std::string::npos) {
-        selection.dit_model_path = xl ? "acestep-v15-xl-sft" : "acestep-v15-base";
+    const bool sft = model_name.find("sft") != std::string::npos;
+    if (sft) {
+        selection.dit_model_path = xl ? "acestep-v15-xl-sft" : "acestep-v15-sft";
+    } else if (model_name.find("base") != std::string::npos) {
+        selection.dit_model_path = "acestep-v15-base";
     } else if (model_name.find("turbo") != std::string::npos) {
         selection.dit_model_path = xl ? "acestep-v15-xl-turbo" : "acestep-v15-turbo";
     }
@@ -95,8 +98,9 @@ runtime::ModelCliInterface cli(const AceStepAssets &) {
     };
     out.load_options = {
         {"ace_step.dit_model_path",
-         "acestep-v15-turbo|acestep-v15-base|acestep-v15-xl-turbo|acestep-v15-xl-sft",
+         "acestep-v15-turbo|acestep-v15-base|acestep-v15-sft|acestep-v15-xl-turbo|acestep-v15-xl-sft",
          "DiT variant inside the model package; the XL variants are optional and must be installed."},
+        {"ace_step.vae_path", "path", "Override VAE GGUF path (e.g. ScragVAE swap-in)."},
         {"ace_step.vae_path", "path", "Override VAE GGUF path (e.g. ScragVAE swap-in)."},
     };
     return out;

@@ -152,6 +152,7 @@ AceStepVAEConfig parse_vae_config(const engine::io::json::Value & value) {
 constexpr std::pair<std::string_view, std::string_view> kDitVariants[] = {
     {"acestep-v15-turbo", "dit_turbo_"},
     {"acestep-v15-base", "dit_base_"},
+    {"acestep-v15-sft", "dit_sft_"},
     {"acestep-v15-xl-turbo", "dit_xl_turbo_"},
     {"acestep-v15-xl-sft", "dit_xl_sft_"},
 };

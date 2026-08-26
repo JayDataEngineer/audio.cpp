@@ -206,6 +206,7 @@ runtime::TaskResult AceStepSession::run(const runtime::TaskRequest &request) {
         (ace_request.generation.thinking || ace_step_request_needs_lm_for_cot(ace_request));
     const bool generate_planner_audio_codes = ace_request.generation.thinking && !has_request_audio_codes;
     if (use_planner) {
+        emit_progress(1, 4, "planner");
         const auto planner_ensure_start = Clock::now();
         ensure_planner();
         engine::debug::timing_log_scalar("ace_step.session.ensure_planner_ms",
@@ -235,6 +236,7 @@ runtime::TaskResult AceStepSession::run(const runtime::TaskRequest &request) {
     validate_task_route_source_input(ace_request, route, plan);
 
     const auto pre_dit_ensure_start = Clock::now();
+    emit_progress(use_planner ? 2 : 1, 4, "pre_dit");
     ensure_pre_dit();
     engine::debug::timing_log_scalar("ace_step.session.ensure_pre_dit_ms",
                                      engine::debug::elapsed_ms(pre_dit_ensure_start, Clock::now()));
@@ -259,6 +261,7 @@ runtime::TaskResult AceStepSession::run(const runtime::TaskRequest &request) {
     const AceStepGenerationOptions generation_options =
         normalize_generation_options_for_model(ace_request.generation, *assets_);
     const auto diffusion_start = Clock::now();
+    emit_progress(use_planner ? 3 : 2, 4, "diffusion");
     AceStepLatents latents = diffusion_->generate_latents(conditioning, generation_options);
     engine::debug::timing_log_scalar("ace_step.session.diffusion_generate_ms",
                                      engine::debug::elapsed_ms(diffusion_start, Clock::now()));
@@ -273,6 +276,7 @@ runtime::TaskResult AceStepSession::run(const runtime::TaskRequest &request) {
     engine::debug::timing_log_scalar("ace_step.session.ensure_vae_decoder_ms",
                                      engine::debug::elapsed_ms(vae_ensure_start, Clock::now()));
     const auto vae_decode_start = Clock::now();
+    emit_progress(4, 4, "vae_decode");
     runtime::AudioBuffer audio = vae_decoder_->decode(latents);
     engine::debug::timing_log_scalar("ace_step.session.vae_decode_ms", engine::debug::elapsed_ms(vae_decode_start, Clock::now()));
     if (mem_saver_) {

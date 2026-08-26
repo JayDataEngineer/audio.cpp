@@ -16,8 +16,10 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -75,9 +77,13 @@ MossSfxV2Session::MossSfxV2Session(
 }
 
 MossSfxV2Session::~MossSfxV2Session() {
+    // Runners must die before the weight contexts they reference (frees the
+    // migrated CUDA buffers, which ggml_free(ctx) does NOT do in this ggml).
     dit_runner_.reset();
     vae_runner_.reset();
+    text_encoder_.reset();
     // LoadedWeights freed after the runners that reference their contexts.
+    std::fprintf(stderr, "[moss_sfx_v2] session destroyed (runners + migrated weights freed)\n");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -339,6 +345,24 @@ bool MossSfxV2Session::run_sfx(
         "[moss_sfx_v2] loop: %.2fs total, %.2fs in forward (%.1f%%) avg %.3fs/step\n",
         t_tot, t_fwd_us / 1e6, 100.0 * t_fwd_us / (t_tot * 1e6),
         t_tot / sched.n_steps);
+
+    // Debug hook: dump the final denoised latent (before VAE decode) so it can
+    // be decoded through the upstream Python VAE for a shared-latent parity
+    // probe. Raw float32, time-major [T_latent, in_dim]. Env var = output path.
+    if (const char* dump_path = std::getenv("AUDIOCORE_DUMP_LATENT")) {
+        std::ofstream lf(dump_path, std::ios::binary);
+        if (lf) {
+            lf.write(reinterpret_cast<const char*>(x_t.data()),
+                     static_cast<std::streamsize>(x_t.size() * sizeof(float)));
+            std::fprintf(stderr,
+                "[moss_sfx_v2] dumped final latent → %s (%zu floats, T=%d dim=%d)\n",
+                dump_path, x_t.size(), T_latent, dc.in_dim);
+        } else {
+            std::fprintf(stderr,
+                "[moss_sfx_v2] WARNING: could not open %s for latent dump\n",
+                dump_path);
+        }
+    }
 
     // ── 6. VAE decode → PCM mono ─────────────────────────────────────────
     const int32_t T_audio = T_latent * up;

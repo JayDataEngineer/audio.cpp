@@ -1488,7 +1488,10 @@ public:
             pre.encoder_hidden_states.tokens,
             pre.encoder_hidden_states_non_cover.tokens);
         const bool use_diffusion_cfg = !config.is_turbo && options.guidance_scale > 1.0F;
-        const bool reference_skips_wavelet_dcw = assets_->selection.dit_model_path == "acestep-v15-base";
+        // Base-class checkpoints (base, sft) skip wavelet DCW for the reference;
+        // only the turbo variant runs it. SFT is a fine-tune of base, so it
+        // inherits the base behavior.
+        const bool reference_skips_wavelet_dcw = assets_->selection.dit_model_path != "acestep-v15-turbo";
         const int64_t diffusion_batch_size = use_diffusion_cfg ? int64_t{2} : int64_t{1};
         if (use_diffusion_cfg && weights_->null_condition_emb_host.empty()) {
             throw std::runtime_error("ACE-Step Base CFG requires null_condition_emb");

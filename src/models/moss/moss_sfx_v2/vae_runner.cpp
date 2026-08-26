@@ -753,6 +753,7 @@ VAERunner::~VAERunner() {
         sched_ = nullptr;
     }
     backend_pair_.reset();
+    std::fprintf(stderr, "[vae] VAE runner destroyed\n");
 }
 
 bool VAERunner::ensure_backend() {

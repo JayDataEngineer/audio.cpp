@@ -252,7 +252,8 @@ ResourceRoots resolve_source_roots(const std::filesystem::path & model_root, con
 }
 
 std::filesystem::path resolve_resource_ref(const std::unordered_map<std::string, std::filesystem::path> & roots,
-    const std::string & ref) {
+    const std::string & ref,
+    const std::optional<std::filesystem::path> & fallback_root = std::nullopt) {
     const auto split = ref.find(':');
     if (split == std::string::npos || split == 0) {
         throw std::runtime_error("invalid model resource reference: " + ref);
@@ -266,17 +267,28 @@ std::filesystem::path resolve_resource_ref(const std::unordered_map<std::string,
     if (relative_path.empty()) {
         return root_it->second;
     }
-    return root_it->second / relative_path;
+    const auto path = root_it->second / relative_path;
+    if (!engine::io::is_existing_file(path) && fallback_root.has_value()) {
+        // 2026-08-13: the catalog-declared location is authoritative — the
+        // GGUF's embedded sidecars are a per-file FALLBACK only (portable
+        // bare GGUFs), never a second root that shadows the on-disk layout.
+        const auto fallback = *fallback_root / relative_path;
+        if (engine::io::is_existing_file(fallback)) {
+            return fallback;
+        }
+    }
+    return path;
 }
 
 void add_resource_map(assets::ResourceBundle & bundle,
     const ResourceRoots & roots,
-    const engine::io::json::Value * map_value) {
+    const engine::io::json::Value * map_value,
+    const std::optional<std::filesystem::path> & fallback_root = std::nullopt) {
     if (map_value == nullptr || map_value->is_null()) {
         return;
     }
     for (const auto & [id, ref] : map_value->as_object()) {
-        const auto path = resolve_resource_ref(roots, ref.as_string());
+        const auto path = resolve_resource_ref(roots, ref.as_string(), fallback_root);
         if (!engine::io::is_existing_file(path)) {
             throw std::runtime_error("missing model package file '" + id + "': " + path.string());
         }
@@ -285,10 +297,11 @@ void add_resource_map(assets::ResourceBundle & bundle,
 }
 
 std::filesystem::path resolve_tensor_source_ref(const ResourceRoots & roots, const engine::io::json::Value & value,
-    std::string & prefix) {
+    std::string & prefix,
+    const std::optional<std::filesystem::path> & fallback_root = std::nullopt) {
     if (value.is_string()) {
         prefix.clear();
-        return resolve_resource_ref(roots, value.as_string());
+        return resolve_resource_ref(roots, value.as_string(), fallback_root);
     }
     const auto & object = value.as_object();
     const auto source_it = object.find("source");
@@ -297,18 +310,19 @@ std::filesystem::path resolve_tensor_source_ref(const ResourceRoots & roots, con
     }
     const auto prefix_it = object.find("prefix");
     prefix = prefix_it == object.end() ? "" : prefix_it->second.as_string();
-    return resolve_resource_ref(roots, source_it->second.as_string());
+    return resolve_resource_ref(roots, source_it->second.as_string(), fallback_root);
 }
 
 void add_tensor_map(assets::ResourceBundle & bundle,
     const ResourceRoots & roots,
-    const engine::io::json::Value * map_value) {
+    const engine::io::json::Value * map_value,
+    const std::optional<std::filesystem::path> & fallback_root = std::nullopt) {
     if (map_value == nullptr || map_value->is_null()) {
         return;
     }
     for (const auto & [id, ref] : map_value->as_object()) {
         std::string prefix;
-        const auto path = resolve_tensor_source_ref(roots, ref, prefix);
+        const auto path = resolve_tensor_source_ref(roots, ref, prefix, fallback_root);
         if (!engine::io::is_existing_file(path)) {
             throw std::runtime_error("missing model tensor source '" + id + "': " + path.string());
         }
@@ -338,12 +352,13 @@ void add_optional_tensor_map(assets::ResourceBundle & bundle,
 }
 
 void add_optional_resource_map(assets::ResourceBundle & bundle, const ResourceRoots & roots,
-    const engine::io::json::Value * map_value) {
+    const engine::io::json::Value * map_value,
+    const std::optional<std::filesystem::path> & fallback_root = std::nullopt) {
     if (map_value == nullptr || map_value->is_null()) {
         return;
     }
     for (const auto & [id, ref] : map_value->as_object()) {
-        const auto path = resolve_resource_ref(roots, ref.as_string());
+        const auto path = resolve_resource_ref(roots, ref.as_string(), fallback_root);
         if (engine::io::is_existing_file(path)) {
             bundle.add_file(id, path);
         }
@@ -370,11 +385,12 @@ std::vector<assets::ResourceFile> resources_from_resource_map(const ResourceRoot
 }
 
 assets::ResourceBundle load_source(const std::filesystem::path & model_root, const engine::io::json::Value & source,
-    const ResourceRoots & roots) {
+    const ResourceRoots & roots,
+    const std::optional<std::filesystem::path> & fallback_root = std::nullopt) {
     assets::ResourceBundle bundle(model_root);
-    add_resource_map(bundle, roots, source.find("files"));
-    add_optional_resource_map(bundle, roots, source.find("optional_files"));
-    add_tensor_map(bundle, roots, source.find("tensors"));
+    add_resource_map(bundle, roots, source.find("files"), fallback_root);
+    add_optional_resource_map(bundle, roots, source.find("optional_files"), fallback_root);
+    add_tensor_map(bundle, roots, source.find("tensors"), fallback_root);
     add_optional_tensor_map(bundle, roots, source.find("optional_tensors"));
     return bundle;
 }
@@ -396,6 +412,9 @@ struct SelectedSource {
     ResourceRoots roots;
     std::string spec_description;
     std::string source_format;
+    // Per-file fallback root (GGUF embedded sidecars) — never the primary
+    // resolution target (2026-08-13 external-first contract).
+    std::optional<std::filesystem::path> sidecar_root;
 };
 
 SelectedSource select_source(const std::filesystem::path & model_path, const std::filesystem::path & model_root,
@@ -404,11 +423,12 @@ SelectedSource select_source(const std::filesystem::path & model_path, const std
     if (format == "gguf") {
         const auto prepared = assets::prepare_model_directory(model_path);
         auto roots = resolve_source_roots(prepared.model_root, source, prepared.standalone_gguf);
-        return SelectedSource{prepared.model_root, source, std::move(roots), spec_description, format};
+        return SelectedSource{prepared.model_root, source, std::move(roots), spec_description, format,
+                              prepared.sidecar_root};
     }
     if (format == "safetensors") {
         auto roots = resolve_source_roots(model_root, source, std::nullopt);
-        return SelectedSource{model_root, source, std::move(roots), spec_description, format};
+        return SelectedSource{model_root, source, std::move(roots), spec_description, format, std::nullopt};
     }
     throw std::runtime_error("unsupported model source format: " + format);
 }
@@ -563,7 +583,7 @@ assets::ResourceBundle load_resource_bundle(
     const std::filesystem::path & spec_path) {
     auto selected = require_selected_source(model_path, spec_path);
     try {
-        return load_source(selected.model_root, selected.source, selected.roots);
+        return load_source(selected.model_root, selected.source, selected.roots, selected.sidecar_root);
     } catch (const std::exception & error) {
         throw std::runtime_error("failed to load model resources using " + selected.spec_description +
                                  " source '" + selected.source_format + "': " + error.what());

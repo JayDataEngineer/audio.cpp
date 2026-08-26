@@ -276,6 +276,10 @@ set(SPM_ENABLE_SHARED OFF CACHE BOOL "Build sentencepiece shared libs" FORCE)
 set(SPM_BUILD_TEST OFF CACHE BOOL "Do not build sentencepiece tests" FORCE)
 set(SPM_ENABLE_TCMALLOC OFF CACHE BOOL "Do not probe for tcmalloc" FORCE)
 
+# Compile all static libs (engine_runtime, ggml, sentencepiece) with -fPIC so
+# they can be linked into the audiocore_native SHARED library for Python ctypes.
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
 if (NOT EXISTS "${AUDIOCPP_GGML_SOURCE_DIR}/CMakeLists.txt")
     message(FATAL_ERROR "AUDIOCPP_GGML_SOURCE_DIR does not point to a ggml source tree: ${AUDIOCPP_GGML_SOURCE_DIR}")
 endif()
@@ -1799,6 +1803,24 @@ if (ENGINE_ENABLE_OPENMP)
     target_link_libraries(audiocpp_server PRIVATE OpenMP::OpenMP_CXX)
 endif()
 
+# ─── Native shared library for Python ctypes (eliminates the HTTP server) ──
+# This wraps engine_runtime in a C ABI so the ComfyUI extension can load models
+# in-process via ctypes — no subprocess, no HTTP, no port management.
+# The model persists in the Python process's address space until explicit unload.
+add_library(audiocore_native SHARED
+    app/native_api.cpp
+)
+target_link_libraries(audiocore_native PUBLIC engine_runtime ggml)
+target_include_directories(audiocore_native PRIVATE include app)
+if (ENGINE_ENABLE_OPENMP)
+    target_link_libraries(audiocore_native PRIVATE OpenMP::OpenMP_CXX)
+endif()
+# Ensure the .so can find ggml backends at runtime (same dir as the binary)
+set_target_properties(audiocore_native PROPERTIES
+    INSTALL_RPATH "$ORIGIN"
+    BUILD_WITH_INSTALL_RPATH ON
+)
+
 add_executable(audiocpp_gguf
     app/gguf/main.cpp
 )
@@ -1994,6 +2016,7 @@ if (ENGINE_BUILD_WARMBENCH)
     add_engine_warmbench(muscriptor_warm_bench tests/muscriptor/muscriptor_warm_bench.cpp)
     add_engine_warmbench(moss_tts_nano_warm_bench tests/moss_tts_nano/moss_tts_nano_warm_bench.cpp)
     add_engine_warmbench(moss_sfx_v2_warm_bench tests/moss_sfx_v2/moss_sfx_v2_warm_bench.cpp)
+    add_engine_warmbench(moss_sfx_v2_te_parity tests/moss_sfx_v2/moss_sfx_v2_te_parity.cpp)
     add_engine_warmbench(moss_tts_local_warm_bench tests/moss_tts_local/moss_tts_local_warm_bench.cpp)
     add_engine_warmbench(nemotron_asr_warm_bench tests/nemotron_asr/nemotron_asr_warm_bench.cpp)
     add_engine_warmbench(neutts_warm_bench tests/neutts/neutts_warm_bench.cpp)

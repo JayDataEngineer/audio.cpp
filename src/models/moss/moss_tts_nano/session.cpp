@@ -407,6 +407,7 @@ runtime::TaskResult MossTTSNanoSession::run(const runtime::TaskRequest & request
                 tts_request.generation.active_codebooks));
         audio_tokenizer_decode_ms += engine::debug::elapsed_ms(audio_tokenizer_decode_start, Clock::now());
         ++chunk_index;
+        emit_progress(chunk_index, static_cast<int64_t>(chunk_requests.size()), "tts_chunks");
     }
 
     runtime::TaskResult result;

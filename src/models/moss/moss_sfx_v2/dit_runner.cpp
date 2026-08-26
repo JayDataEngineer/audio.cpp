@@ -281,6 +281,18 @@ DiTRunner::DiTRunner(ggml_context* ext_ctx, const DitConfig& cfg)
 
 DiTRunner::~DiTRunner() {
     release_cached();
+    // Free the migrated DiT weight buffer EXPLICITLY (2026-08-11, second-run OOM).
+    // migrate_ctx_to_backend() returns a CUDA buffer holding ALL DiT weights
+    // (5.4 GB); it is NOT freed by ggml_free(ext_ctx_) (this ggml version's
+    // ggml_free does not walk ctx->buffers) and NOT freed by release_cached().
+    // Without this, every destroyed session leaks the full weight set to the
+    // driver: run N+1 loads fresh weights on top of the resident 5.4 GB and
+    // the VAE's 3.3 GB block buffer OOMs with "CUDA alloc_ctx_tensors failed"
+    // ("first gen worked, second crashed"). Mirrors TextEncoderRunner dtor.
+    if (migrated_buf_) {
+        ggml_backend_buffer_free(migrated_buf_);
+        migrated_buf_ = nullptr;
+    }
     if (sched_) {
         ggml_backend_sched_free(sched_);
         sched_ = nullptr;

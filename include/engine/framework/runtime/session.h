@@ -232,6 +232,15 @@ struct StreamingPolicy {
 
 using StreamEventCallback = std::function<void(const StreamEvent &)>;
 
+// Coarse progress reporting for offline run(). The server installs a callback
+// before calling run(); model sessions fire it at natural milestones (per text
+// chunk for TTS, per pipeline phase for diffusion). Models that never call it
+// are unaffected — the default-empty callback makes this a NON-breaking change
+// for every existing session. This is deliberately separate from the streaming
+// StreamEvent path so offline models (the common case here) get visibility
+// without implementing IStreamingVoiceTaskSession.
+using ProgressCallback = std::function<void(int64_t step, int64_t total, const std::string & label)>;
+
 class IVoiceTaskSession {
 public:
     virtual ~IVoiceTaskSession() = default;
@@ -239,7 +248,32 @@ public:
     virtual std::string family() const = 0;
     virtual VoiceTaskKind task_kind() const = 0;
     virtual RunMode run_mode() const = 0;
+
+    // Install a progress sink the session MAY invoke from run(). Non-virtual:
+    // not part of the polymorphic contract, just a setter on a base member.
+    // Default-empty so sessions that don't emit progress need no changes.
+    void set_progress_callback(ProgressCallback cb) { progress_callback_ = std::move(cb); }
+
+    // Prepare is PUBLIC — callers (CLI, server, native API, chunking) invoke
+    // it before run() to prime the session with the request's audio/text/voice
+    // contract. Was accidentally placed in protected: (commit ~Jul 28), which
+    // broke compilation of every caller with GCC 15's stricter access checks.
     virtual void prepare(const SessionPreparationRequest & request) = 0;
+
+protected:
+    ProgressCallback progress_callback_;
+
+    // Null- and exception-safe helper. Sessions call this from run() loops;
+    // a throw from the sink (or no sink at all) never breaks inference.
+    void emit_progress(int64_t step, int64_t total, const std::string & label) {
+        if (progress_callback_) {
+            try {
+                progress_callback_(step, total, label);
+            } catch (...) {
+                // Progress is best-effort; never let a sink failure abort a run.
+            }
+        }
+    }
 };
 
 class IOfflineVoiceTaskSession : public virtual IVoiceTaskSession {

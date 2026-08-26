@@ -2020,13 +2020,19 @@ BusyGuard::Lock ServerState::acquire_model_run(
 ServerState::TimedTaskResult ServerState::run_model(
     LoadedModel & model,
     const engine::runtime::TaskRequest & request,
-    std::optional<int> busy_timeout_ms) {
+    std::optional<int> busy_timeout_ms,
+    engine::runtime::ProgressCallback progress) {
     BusyGuard::Lock lock = acquire_model_run(model, busy_timeout_ms);
     ensure_model_loaded_locked(model);
     if (model.offline == nullptr) {
         throw std::runtime_error("configured model does not provide offline execution: " + model.config.id);
     }
     const auto started = Clock::now();
+    // Install the progress sink BEFORE run() so the session's per-chunk /
+    // per-phase emits flow through to the caller (e.g. the SSE writer on the
+    // /v1/audio/speech?stream_progress=true path). Default-empty when the
+    // caller passes nothing — identical to the old behavior.
+    model.session->set_progress_callback(std::move(progress));
     model.session->prepare(engine::runtime::build_preparation_request(request));
     auto result = model.offline->run(request);
     // Mark activity at completion too: idle unload must measure from when the
@@ -2099,6 +2105,9 @@ HttpResponse ServerState::handle_speech(const std::string & body_text) {
     const auto request = build_speech_request(model, body);
     if (body.find("stream_format") != nullptr || bool_field(body, "stream", false)) {
         return handle_speech_stream(model, request, body);
+    }
+    if (bool_field(body, "stream_progress", false)) {
+        return handle_speech_progress_stream(model, request, body);
     }
     const auto busy_timeout_ms = parse_busy_timeout_override(body);
     const auto timed_result = model_run_mode(model) == engine::runtime::RunMode::Streaming
@@ -2415,6 +2424,39 @@ HttpResponse ServerState::handle_speech_live(const HttpRequest & request) {
                     "}");
             write_sse_done(writer);
         });
+HttpResponse ServerState::handle_speech_progress_stream(
+    LoadedModel & model,
+    const engine::runtime::TaskRequest & request,
+    const engine::io::json::Value & body) {
+    // Offline speech, but stream coarse progress (per text chunk) as SSE while
+    // the model runs, then deliver the final WAV as a single event. The
+    // alternative to this is silent blocking — a poor show for a multi-minute
+    // cold load. Mirrors handle_speech's offline branch but drives run_model
+    // with a progress sink that writes ``data: {"type":"progress",...}`` lines.
+    const auto busy_timeout_ms = parse_busy_timeout_override(body);
+    LoadedModel * model_ptr = &model;
+    return sse_response([this, model_ptr, request, busy_timeout_ms](HttpStreamWriter & writer) {
+        const auto timed_result = run_model(
+            *model_ptr,
+            request,
+            busy_timeout_ms,
+            [&writer](int64_t step, int64_t total, const std::string & label) {
+                std::ostringstream out;
+                out << "{\"type\":\"progress\",\"step\":" << step
+                    << ",\"total\":" << (total < 1 ? 1 : total)
+                    << ",\"label\":" << json_quote(label) << "}";
+                write_sse(writer, out.str());
+            });
+        const auto & audio = select_audio_output(timed_result.result);
+        const auto wav = encode_pcm16_wav(audio);
+        std::ostringstream done;
+        done << "{\"type\":\"speech.complete\",\"audio\":" << json_quote(base64_encode(wav))
+             << ",\"sample_rate\":" << audio.sample_rate
+             << ",\"channels\":" << audio.channels
+             << ",\"timing\":" << timing_json(timed_result.wall_ms, audio) << "}";
+        write_sse(writer, done.str());
+        write_sse_done(writer);
+    });
 }
 
 HttpResponse ServerState::handle_transcription(const HttpRequest & request) {
@@ -2728,16 +2770,258 @@ HttpResponse ServerState::handle_generic_run(const std::string & body_text) {
     const auto body = engine::io::json::parse(body_text);
     auto & model = require_model(body);
     const auto * request_json = body.find("request");
-    const auto request = apply_default_request_options(
-        model,
-        minitts::cli::build_request_from_json(
-            request_json != nullptr ? *request_json : body,
-            request_base_));
+HttpResponse ServerState::handle_speech_live(const HttpRequest & request) {
+    if (request.body_stream == nullptr) {
+        return error_response(
+            400,
+            "live speech requires an incrementally delivered body (Transfer-Encoding: chunked)",
+            "invalid_request_error");
+    }
+
+    LoadedModel * model_ptr = nullptr;
+    int sample_rate = 16000;
+    int channels = 1;
+    std::optional<int> busy_timeout_ms;
+    minitts::app::PcmSampleFormat sample_format = minitts::app::PcmSampleFormat::S16LE;
+    std::string stream_format = "sse";
+    engine::runtime::TaskRequest task_request;
+    try {
+        const std::string model_id = query_param(request.query, "model");
+        if (model_id.empty()) {
+            throw std::runtime_error("live speech requires a 'model' query parameter");
+        }
+        const std::string input = decoded_query_param(request.query, "input");
+        if (input.empty()) {
+            throw std::runtime_error("live speech requires an 'input' query parameter");
+        }
+
+        engine::io::json::Value::Object fields;
+        fields.emplace("model", engine::io::json::Value::make_string(model_id));
+        fields.emplace("input", engine::io::json::Value::make_string(input));
+        const std::string language = decoded_query_param(request.query, "language");
+        if (!language.empty()) {
+            fields.emplace("language", engine::io::json::Value::make_string(language));
+        }
+        const std::string voice = decoded_query_param(request.query, "voice");
+        if (!voice.empty()) {
+            fields.emplace("voice", engine::io::json::Value::make_string(voice));
+        }
+        const auto body = engine::io::json::Value::make_object(std::move(fields));
+        auto & model = require_model(body);
+        if (model.task.mode != engine::runtime::RunMode::Streaming) {
+            throw std::runtime_error(
+                "live speech requires a model configured with mode=streaming: " +
+                model.config.id);
+        }
+        model_ptr = &model;
+
+        const auto parse_bounded_int = [&](const char * key, int fallback, int minimum, int maximum) {
+            const std::string raw = query_param(request.query, key);
+            if (raw.empty()) {
+                return fallback;
+            }
+            long long value = 0;
+            size_t consumed = 0;
+            try {
+                value = std::stoll(raw, &consumed);
+            } catch (const std::exception &) {
+                throw std::runtime_error(
+                    std::string("live speech ") + key + " must be an integer");
+            }
+            if (consumed != raw.size()) {
+                throw std::runtime_error(
+                    std::string("live speech ") + key + " must be an integer");
+            }
+            if (value < minimum || value > maximum) {
+                throw std::runtime_error(
+                    std::string("live speech ") + key + " must be between " +
+                    std::to_string(minimum) + " and " + std::to_string(maximum));
+            }
+            return static_cast<int>(value);
+        };
+        sample_rate = parse_bounded_int("sample_rate", 16000, 1000, 384'000);
+        channels = parse_bounded_int("channels", 1, 1, 16);
+        if (!query_param(request.query, "busy_timeout_ms").empty()) {
+            busy_timeout_ms = parse_bounded_int(
+                "busy_timeout_ms", 0, 0, std::numeric_limits<int>::max());
+        }
+        const std::string sample_format_name = query_param(request.query, "sample_format");
+        sample_format = minitts::app::parse_pcm_sample_format(
+            sample_format_name.empty() ? "s16le" : sample_format_name);
+        const std::string response_format = query_param(request.query, "response_format").empty()
+            ? "pcm"
+            : query_param(request.query, "response_format");
+        if (response_format != "pcm") {
+            throw std::runtime_error("live speech currently supports response_format=pcm");
+        }
+        stream_format = query_param(request.query, "stream_format").empty()
+            ? "sse"
+            : query_param(request.query, "stream_format");
+        if (stream_format != "sse" && stream_format != "audio") {
+            throw std::runtime_error("live speech stream_format must be sse or audio");
+        }
+
+        task_request = build_speech_request(model, body);
+        engine::runtime::AudioBuffer audio_contract;
+        audio_contract.sample_rate = sample_rate;
+        audio_contract.channels = channels;
+        task_request.audio_input = std::move(audio_contract);
+        const auto add_query_option = [&](const char * key, const char * option_key) {
+            const std::string value = decoded_query_param(request.query, key);
+            if (!value.empty()) {
+                task_request.options[option_key] = value;
+            }
+        };
+        add_query_option("seed", "seed");
+        add_query_option("temperature", "temperature");
+        add_query_option("top_k", "top_k");
+        add_query_option("top_p", "top_p");
+        add_query_option("max_tokens", "max_tokens");
+        add_query_option("max_steps", "max_steps");
+        add_query_option("repetition_penalty", "repetition_penalty");
+        add_query_option("guidance_scale", "guidance_scale");
+        add_query_option("num_inference_steps", "num_inference_steps");
+        add_query_option("instructions", "system_prompt");
+        add_query_option("reference_text", "reference_text");
+        add_query_option("voice_id", "voice_id");
+        add_query_option("system_prompt", "system_prompt");
+        add_query_option("text_temperature", "text_temperature");
+        add_query_option("text_top_k", "text_top_k");
+        add_query_option("do_sample", "do_sample");
+    } catch (const std::runtime_error & ex) {
+        return error_response(400, ex.what(), "invalid_request_error");
+    }
+
+    std::istream * pcm_input = request.body_stream;
+    if (stream_format == "audio") {
+        return chunked_audio_response([this, model_ptr, task_request, pcm_input, sample_rate, channels, sample_format, busy_timeout_ms](
+                                          HttpStreamWriter & writer) {
+            const minitts::app::AudioStreamFormat format{sample_rate, channels};
+            const auto audio = minitts::app::make_pcm_chunk_stream(*pcm_input, format, sample_format);
+            bool wrote_audio = false;
+            (void)run_streaming_model_from(
+                *model_ptr,
+                task_request,
+                audio,
+                [&](const engine::runtime::StreamEvent & event) {
+                    if (event.audio_output.has_value()) {
+                        const auto pcm = encode_pcm16_samples(*event.audio_output);
+                        writer.write(std::string(reinterpret_cast<const char *>(pcm.data()), pcm.size()));
+                        wrote_audio = true;
+                    }
+                    for (const auto & named : event.named_audio_outputs) {
+                        const auto pcm = encode_pcm16_samples(named.audio);
+                        writer.write(std::string(reinterpret_cast<const char *>(pcm.data()), pcm.size()));
+                        wrote_audio = true;
+                    }
+                },
+                busy_timeout_ms);
+            if (!wrote_audio) {
+                throw std::runtime_error("live speech model produced no audio delta events");
+            }
+        });
+    }
+    return sse_response(
+        [this, model_ptr, task_request, pcm_input, sample_rate, channels, sample_format, busy_timeout_ms](
+            HttpStreamWriter & writer) {
+            const minitts::app::AudioStreamFormat format{sample_rate, channels};
+            const auto audio = minitts::app::make_pcm_chunk_stream(*pcm_input, format, sample_format);
+            const auto request_started = Clock::now();
+            std::optional<double> first_audio_ms;
+            std::optional<double> input_end_ms;
+            minitts::app::AudioChunkStream timed_audio;
+            timed_audio.format = audio.format;
+            timed_audio.read = [
+                                   reader = audio.read,
+                                   request_started,
+                                   &input_end_ms
+                               ](int64_t max_samples, std::vector<float> & samples) mutable {
+                const bool has_more = reader(max_samples, samples);
+                if (!has_more && !input_end_ms.has_value()) {
+                    input_end_ms = elapsed_ms(request_started);
+                }
+                return has_more;
+            };
+            bool wrote_audio = false;
+            const auto timed_result = run_streaming_model_from(
+                *model_ptr,
+                task_request,
+                timed_audio,
+                [&](const engine::runtime::StreamEvent & event) {
+                    if (event.audio_output.has_value()) {
+                        if (!first_audio_ms.has_value()) {
+                            first_audio_ms = elapsed_ms(request_started);
+                        }
+                        const auto pcm = encode_pcm16_samples(*event.audio_output);
+                        write_sse(
+                            writer,
+                            "{\"type\":\"speech.audio.delta\",\"audio\":" +
+                                json_quote(base64_encode(pcm)) +
+                                "}");
+                        wrote_audio = true;
+                    }
+                    for (const auto & named : event.named_audio_outputs) {
+                        if (!first_audio_ms.has_value()) {
+                            first_audio_ms = elapsed_ms(request_started);
+                        }
+                        const auto pcm = encode_pcm16_samples(named.audio);
+                        write_sse(
+                            writer,
+                            "{\"type\":\"speech.audio.delta\",\"audio\":" +
+                                json_quote(base64_encode(pcm)) +
+                                "}");
+                        wrote_audio = true;
+                    }
+                },
+                busy_timeout_ms);
+            if (!wrote_audio) {
+                throw std::runtime_error("live speech model produced no audio delta events");
+            }
+            write_sse(
+                writer,
+                "{\"type\":\"speech.audio.done\",\"timing\":" +
+                    live_speech_timing_json(
+                        require_ttft_ms(first_audio_ms),
+                        require_input_end_ms(input_end_ms)) +
+                    "}");
+            write_sse_done(writer);
+        });
+    if (bool_field(body, "stream_progress", false)) {
+        return handle_generic_progress_stream(model, request, body);
+    }
     const auto busy_timeout_ms = parse_busy_timeout_override(body);
     const auto timed_result = model_run_mode(model) == engine::runtime::RunMode::Streaming
         ? run_streaming_model(model, request, {}, busy_timeout_ms)
         : run_model(model, request, busy_timeout_ms);
     return json_response(task_result_json(timed_result.result, timed_result.wall_ms));
+}
+
+HttpResponse ServerState::handle_generic_progress_stream(
+    LoadedModel & model,
+    const engine::runtime::TaskRequest & request,
+    const engine::io::json::Value & body) {
+    // Generic (music/SFX) counterpart of handle_speech_progress_stream: emit
+    // per-phase/step progress as SSE, then the full task result as one event.
+    const auto busy_timeout_ms = parse_busy_timeout_override(body);
+    LoadedModel * model_ptr = &model;
+    return sse_response([this, model_ptr, request, busy_timeout_ms](HttpStreamWriter & writer) {
+        const auto timed_result = run_model(
+            *model_ptr,
+            request,
+            busy_timeout_ms,
+            [&writer](int64_t step, int64_t total, const std::string & label) {
+                std::ostringstream out;
+                out << "{\"type\":\"progress\",\"step\":" << step
+                    << ",\"total\":" << (total < 1 ? 1 : total)
+                    << ",\"label\":" << json_quote(label) << "}";
+                write_sse(writer, out.str());
+            });
+        std::ostringstream done;
+        done << "{\"type\":\"task.complete\",\"result\":"
+             << task_result_json(timed_result.result, timed_result.wall_ms) << "}";
+        write_sse(writer, done.str());
+        write_sse_done(writer);
+    });
 }
 
 HttpResponse ServerState::handle_generic_stream(const std::string & body_text) {

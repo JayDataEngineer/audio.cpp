@@ -199,6 +199,10 @@ void convert_tensor_source_to_gguf(const std::filesystem::path & input_path, con
 struct PreparedModelDirectory {
     std::filesystem::path model_root;
     std::optional<std::filesystem::path> standalone_gguf;
+    // 2026-08-13: per-file fallback ONLY. The catalog-declared model_root
+    // is authoritative — sidecar materialization may fill gaps for bare
+    // portable GGUFs but must never shadow the on-disk layout.
+    std::optional<std::filesystem::path> sidecar_root;
 };
 // *.gguf files directly inside `directory`, sorted by name; empty when it is not a directory.
 [[nodiscard]] std::vector<std::filesystem::path> directory_gguf_files(const std::filesystem::path & directory);

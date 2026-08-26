@@ -1729,15 +1729,26 @@ PreparedModelDirectory prepare_model_directory(const std::filesystem::path & mod
     }
     if (engine::io::is_existing_file(gguf_path) && lower_ascii(gguf_path.extension().string()) == ".gguf") {
         const auto canonical_gguf = std::filesystem::weakly_canonical(gguf_path);
-        if (gguf_has_embedded_sidecars(gguf_path)) {
-            return {materialize_gguf_sidecars(gguf_path), canonical_gguf};
-        }
         const auto external_root =
             engine::io::is_existing_directory(model_path) ? model_path : model_path.parent_path();
-        return {std::filesystem::weakly_canonical(external_root), canonical_gguf};
+        // 2026-08-13 (LIVE FAILURE): the catalog-declared location is THE
+        // model root — a second /tmp/audiocpp-gguf materialization drifted:
+        // variant GGUFs embed only their own sidecars (SFT ships only
+        // acestep-v15-sft/config.json), so a full-spec load failed with
+        // "missing model file 'dit_turbo_config'" even though every spec
+        // file existed in the catalog dir. External-first, 1:1: sidecars
+        // are a per-file FALLBACK only (see resolve_resource_ref), never a
+        // shadowing root.
+        PreparedModelDirectory prepared;
+        prepared.model_root = std::filesystem::weakly_canonical(external_root);
+        prepared.standalone_gguf = canonical_gguf;
+        if (gguf_has_embedded_sidecars(gguf_path)) {
+            prepared.sidecar_root = materialize_gguf_sidecars(gguf_path);
+        }
+        return prepared;
     }
     const auto root = engine::io::is_existing_directory(model_path) ? model_path : model_path.parent_path();
-    return {std::filesystem::weakly_canonical(root), std::nullopt};
+    return {std::filesystem::weakly_canonical(root), std::nullopt, std::nullopt};
 }
 
 void convert_tensor_sources_to_gguf(const std::vector<TensorSourceInput> & inputs,
