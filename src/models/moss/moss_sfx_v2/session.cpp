@@ -288,6 +288,48 @@ bool MossSfxV2Session::run_sfx(
     std::normal_distribution<float> ndist(0.0f, 1.0f);
     std::vector<float> x_t(static_cast<size_t>(T_latent) * dc.in_dim);
     for (auto& v : x_t) v = ndist(rng);
+    // Debug hook: LOAD the initial noise latent from a raw f32 file
+    // (T-major [T_latent, in_dim]) instead of generating it, for byte-level
+    // parity verification against the Python reference. Opt-in via
+    // AUDIOCORE_LOAD_NOISE (path to f32 file).
+    if (const char* lp = std::getenv("AUDIOCORE_LOAD_NOISE")) {
+        const std::string lpath = std::string(lp);
+        std::FILE* f = std::fopen(lpath.c_str(), "rb");
+        if (f) {
+            const size_t expect = x_t.size();
+            const size_t got = std::fread(x_t.data(), sizeof(float), expect, f);
+            std::fclose(f);
+            if (got == expect) {
+                std::fprintf(stderr,
+                    "[moss_sfx_v2] loaded noise [%zu floats] <- %s\n",
+                    got, lpath.c_str());
+            } else {
+                std::fprintf(stderr,
+                    "[moss_sfx_v2] WARNING: noise load short read %zu/%zu from %s\n",
+                    got, expect, lpath.c_str());
+            }
+        } else {
+            std::fprintf(stderr,
+                "[moss_sfx_v2] WARNING: AUDIOCORE_LOAD_NOISE=%s fopen failed\n",
+                lpath.c_str());
+        }
+    }
+
+    // Debug hook: dump the initial noise latent (raw f32, T-major
+    // [T_latent, in_dim]) for byte-level parity verification against the
+    // Python reference, which consumes it directly. Opt-in via
+    // AUDIOCORE_DUMP_NOISE.
+    if (const char* dp = std::getenv("AUDIOCORE_DUMP_NOISE")) {
+        const std::string dpath = std::string(dp);
+        std::FILE* f = std::fopen(dpath.c_str(), "wb");
+        if (f) {
+            std::fwrite(x_t.data(), sizeof(float), x_t.size(), f);
+            std::fclose(f);
+            std::fprintf(stderr,
+                "[moss_sfx_v2] dumped noise [%zu floats] -> %s\n",
+                x_t.size(), dpath.c_str());
+        }
+    }
 
     // ── 4. Flow-matching schedule ────────────────────────────────────────
     const int steps = (num_steps > 0) ? num_steps : 50;
@@ -367,7 +409,12 @@ bool MossSfxV2Session::run_sfx(
     // ── 6. VAE decode → PCM mono ─────────────────────────────────────────
     const int32_t T_audio = T_latent * up;
     pcm_out->resize(static_cast<size_t>(T_audio));
-    constexpr int32_t kVaeChunkLatent = 500;  // ≤10s/chunk fits 24 GB VRAM
+    constexpr int32_t kVaeChunkLatent = 128;  // VAE decode chunk (latent frames). With the
+                                            // gallocr allocator, peak VRAM is liveness-based
+                                            // (chunk size no longer drives OOM), so this only
+                                            // trades graph-build count vs per-chunk latency:
+                                            // 12 chunks per 30s latent. 500 works too; 128 is
+                                            // the value proven with gallocr (2026-08-06).
     {
         auto v0 = std::chrono::steady_clock::now();
         const int n_chunks =
@@ -411,6 +458,22 @@ bool MossSfxV2Session::run_sfx(
 
     if (static_cast<int32_t>(pcm_out->size()) > num_samples) {
         pcm_out->resize(static_cast<size_t>(num_samples));
+    }
+
+    // Debug hook: dump the RAW VAE output (f32 mono, after crop, BEFORE
+    // post-processing) for parity verification against the Python
+    // reference, which applies no post-processing. Opt-in via
+    // AUDIOCORE_DUMP_PCM.
+    if (const char* dp = std::getenv("AUDIOCORE_DUMP_PCM")) {
+        const std::string dpath = std::string(dp);
+        std::FILE* f = std::fopen(dpath.c_str(), "wb");
+        if (f) {
+            std::fwrite(pcm_out->data(), sizeof(float), pcm_out->size(), f);
+            std::fclose(f);
+            std::fprintf(stderr,
+                "[moss_sfx_v2] dumped raw PCM [%zu floats] -> %s\n",
+                pcm_out->size(), dpath.c_str());
+        }
     }
 
     // ── 7. Post-processing: DC removal + gentle normalization ────────────
