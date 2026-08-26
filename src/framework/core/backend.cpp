@@ -4,12 +4,11 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <ostream>
 #include <stdexcept>
 #include <string>
 
 namespace engine::core {
-
-namespace {
 
 void ensure_backends_loaded() {
     if (ggml_backend_reg_count() == 0) {
@@ -17,12 +16,15 @@ void ensure_backends_loaded() {
     }
 }
 
+namespace {
+
 // A backend is identified by the name of the ggml registry that owns it. The device type
 // (GPU/IGPU/ACCEL) deliberately plays no part in that: Metal reports GPU rather than ACCEL,
 // Vulkan reports IGPU on integrated GPUs, and those values are free to change upstream.
 //
-// The CUDA registry name depends on how ggml was built - GGML_CUDA_NAME is "ROCm" under HIP
-// and "MUSA" under MUSA - so every alias has to be accepted. The names are spelled out here
+// The CUDA registry name depends on how ggml was built - GGML_CUDA_NAME is "MUSA" under
+// MUSA - so every alias has to be accepted. HIP builds share the ggml CUDA backend but
+// register as "ROCm" and get their own BackendType::Hip. The names are spelled out here
 // instead of pulled from ggml-cuda.h/ggml-vulkan.h because those headers resolve against the
 // backend's own build flags, which are not visible from this translation unit.
 struct BackendRegNames {
@@ -31,7 +33,8 @@ struct BackendRegNames {
 };
 
 constexpr BackendRegNames k_backend_reg_names[] = {
-    {BackendType::Cuda,   {"CUDA", "ROCm", "MUSA"}},
+    {BackendType::Cuda,   {"CUDA", "MUSA", nullptr}},
+    {BackendType::Hip,    {"ROCm", nullptr, nullptr}},
     {BackendType::Vulkan, {"Vulkan", nullptr, nullptr}},
     {BackendType::Metal,  {"MTL", nullptr, nullptr}},
 };
@@ -64,6 +67,10 @@ bool backend_handle_matches(ggml_backend_t backend, BackendType type) {
 
 bool is_cuda_backend_handle(ggml_backend_t backend) {
     return backend_handle_matches(backend, BackendType::Cuda);
+}
+
+bool is_hip_backend_handle(ggml_backend_t backend) {
+    return backend_handle_matches(backend, BackendType::Hip);
 }
 
 bool is_vulkan_backend_handle(ggml_backend_t backend) {
@@ -113,30 +120,15 @@ const char * backend_dev_type_label(enum ggml_backend_dev_type type) {
 
 std::string describe_available_devices() {
     std::string description;
-    for (size_t i = 0; i < ggml_backend_reg_count(); ++i) {
-        ggml_backend_reg_t reg = ggml_backend_reg_get(i);
-        if (reg == nullptr) {
-            continue;
+    for (const auto & device : list_backend_devices()) {
+        if (!description.empty()) {
+            description += ", ";
         }
-        const char * reg_name = ggml_backend_reg_name(reg);
-        for (size_t j = 0; j < ggml_backend_reg_dev_count(reg); ++j) {
-            ggml_backend_dev_t dev = ggml_backend_reg_dev_get(reg, j);
-            if (dev == nullptr) {
-                continue;
-            }
-            if (!description.empty()) {
-                description += ", ";
-            }
-            description += (reg_name != nullptr ? reg_name : "<unnamed>");
-            description += ":" + std::to_string(j);
-            const char * dev_name = ggml_backend_dev_name(dev);
-            if (dev_name != nullptr) {
-                description += " \"" + std::string(dev_name) + "\"";
-            }
-            description += " [";
-            description += backend_dev_type_label(ggml_backend_dev_type(dev));
-            description += "]";
+        description += device.backend + ":" + std::to_string(device.index);
+        if (!device.name.empty()) {
+            description += " \"" + device.name + "\"";
         }
+        description += " [" + device.type + "]";
     }
     return description.empty() ? "none" : description;
 }
@@ -182,6 +174,53 @@ bool backend_graph_validation_enabled() {
 }
 #endif
 
+}  // namespace
+
+std::vector<BackendDeviceInfo> list_backend_devices() {
+    ensure_backends_loaded();
+    std::vector<BackendDeviceInfo> devices;
+    for (size_t i = 0; i < ggml_backend_reg_count(); ++i) {
+        ggml_backend_reg_t reg = ggml_backend_reg_get(i);
+        if (reg == nullptr) {
+            continue;
+        }
+        const char * reg_name = ggml_backend_reg_name(reg);
+        for (size_t j = 0; j < ggml_backend_reg_dev_count(reg); ++j) {
+            ggml_backend_dev_t dev = ggml_backend_reg_dev_get(reg, j);
+            if (dev == nullptr) {
+                continue;
+            }
+            BackendDeviceInfo info;
+            info.backend = reg_name != nullptr ? reg_name : "<unnamed>";
+            info.index = static_cast<int>(j);
+            // Prefer the description: ggml's device name is a generic handle
+            // ("CUDA0", "ROCm0"), while the description carries the hardware
+            // name ("NVIDIA GeForce RTX 2080 Ti") that tells identical cards apart.
+            const char * dev_description = ggml_backend_dev_description(dev);
+            const char * dev_name = ggml_backend_dev_name(dev);
+            if (dev_description != nullptr && dev_description[0] != '\0') {
+                info.name = dev_description;
+            } else if (dev_name != nullptr) {
+                info.name = dev_name;
+            }
+            info.type = backend_dev_type_label(ggml_backend_dev_type(dev));
+            devices.push_back(std::move(info));
+        }
+    }
+    return devices;
+}
+
+void print_backend_devices(std::ostream & out) {
+    const auto devices = list_backend_devices();
+    out << "available_devices=" << devices.size() << "\n";
+    for (const auto & device : devices) {
+        out << device.backend << ":" << device.index;
+        if (!device.name.empty()) {
+            out << " \"" << device.name << "\"";
+        }
+        out << " [" << device.type << "]\n";
+    }
+    out << "select with: --backend <cuda|hip|vulkan|metal|cpu> --device <index>\n";
 }
 
 ggml_backend_t init_backend(const BackendConfig & config) {
@@ -194,6 +233,8 @@ ggml_backend_t init_backend(const BackendConfig & config) {
             }
             return backend;
         }
+        case BackendType::Hip:
+            return init_device_backend(BackendType::Hip, "HIP", config);
         case BackendType::Cuda:
             return init_device_backend(BackendType::Cuda, "CUDA", config);
         case BackendType::Vulkan:
@@ -240,6 +281,9 @@ BackendType backend_type(ggml_backend_t backend) {
     if (is_host_backend(backend)) {
         return BackendType::Cpu;
     }
+    if (is_hip_backend_handle(backend)) {
+        return BackendType::Hip;
+    }
     if (is_cuda_backend_handle(backend)) {
         return BackendType::Cuda;
     }
@@ -275,12 +319,35 @@ static void cuda_clear_graph(ggml_backend_t backend, ggml_cgraph * graph) {
     if (fn != nullptr) fn(backend, graph);
 }
 
-void release_backend_graph_resources(ggml_backend_t backend, ggml_cgraph * graph) {
-    if (is_cuda_backend_handle(backend)) cuda_clear_graph(backend, graph);
+static void cuda_trim_pools(ggml_backend_t backend) {
+    if (backend == nullptr) return;
+    ggml_backend_dev_t device = ggml_backend_get_device(backend);
+    if (device == nullptr) return;
+    auto fn = (void (*)(ggml_backend_t))
+        ggml_backend_reg_get_proc_address(
+            ggml_backend_dev_backend_reg(device),
+            "ggml_backend_cuda_trim_pools");
+    if (fn != nullptr) fn(backend);
 }
 
-void release_backend_graph_resources(BackendType backend_type, ggml_backend_t backend, ggml_cgraph * graph) {
-    if (backend_type == BackendType::Cuda) cuda_clear_graph(backend, graph);
+void trim_backend_pools(ggml_backend_t backend) {
+    if (is_cuda_backend_handle(backend) || is_hip_backend_handle(backend)) cuda_trim_pools(backend);
+}
+
+// evict_cuda_graph_cache defaults to false, preserving historical behavior
+// for existing call sites: before the CUDA backend exported
+// ggml_backend_cuda_clear_graph the lookup resolved nothing, and families
+// that rebuild same-shape graphs between requests inherit a warm CUDA-graph
+// cache from that. Families that prefer bounded memory over the warm
+// carry-over opt in with true.
+void release_backend_graph_resources(ggml_backend_t backend, ggml_cgraph * graph, bool evict_cuda_graph_cache) {
+    if (!evict_cuda_graph_cache) return;  // existing callsite/behavior unchanged
+    if (is_cuda_backend_handle(backend) || is_hip_backend_handle(backend)) cuda_clear_graph(backend, graph);
+}
+
+void release_backend_graph_resources(BackendType backend_type, ggml_backend_t backend, ggml_cgraph * graph, bool evict_cuda_graph_cache) {
+    if (!evict_cuda_graph_cache) return;  // existing callsite/behavior unchanged
+    if (backend_type == BackendType::Cuda || backend_type == BackendType::Hip) cuda_clear_graph(backend, graph);
 }
 
 void validate_backend_graph_supported(ggml_backend_t backend, ggml_cgraph * graph, const char * label) {
@@ -492,6 +559,54 @@ void write_tensor_bf16(const TensorValue & tensor, const std::vector<float> & va
     write_tensor_bf16(tensor, values.data(), values.size());
 }
 
+void write_tensor_float(const TensorValue & tensor, const float * values, size_t count) {
+    switch (tensor.type) {
+        case GGML_TYPE_F32:
+            write_tensor_f32(tensor, values, count);
+            return;
+        case GGML_TYPE_F16:
+            write_tensor_f16(tensor, values, count);
+            return;
+        case GGML_TYPE_BF16:
+            write_tensor_bf16(tensor, values, count);
+            return;
+        default:
+            throw std::runtime_error("write_tensor_float supports only f32/f16/bf16 tensors");
+    }
+}
+
+void write_tensor_float(const TensorValue & tensor, const std::vector<float> & values) {
+    write_tensor_float(tensor, values.data(), values.size());
+}
+
+void write_tensor_bytes(const TensorValue & tensor, const std::vector<std::byte> & bytes) {
+    if (tensor.tensor == nullptr) {
+        throw std::runtime_error("write_tensor_bytes requires non-null tensor");
+    }
+    const size_t expected = static_cast<size_t>(ggml_nbytes(tensor.tensor));
+    if (bytes.size() != expected) {
+        throw std::runtime_error(
+            "write_tensor_bytes byte count does not match tensor '" +
+            std::string(tensor.tensor->name) +
+            "': expected " + std::to_string(expected) +
+            ", got " + std::to_string(bytes.size()));
+    }
+    ggml_backend_tensor_set(tensor.tensor, bytes.data(), 0, bytes.size());
+}
+
+void round_f32_to_bf16_in_place(float * values, size_t count) {
+    if (count == 0) {
+        return;
+    }
+    std::vector<ggml_bf16_t> bf16_values(count);
+    ggml_fp32_to_bf16_row(values, bf16_values.data(), static_cast<int64_t>(count));
+    ggml_bf16_to_fp32_row(bf16_values.data(), values, static_cast<int64_t>(count));
+}
+
+void round_f32_to_bf16_in_place(std::vector<float> & values) {
+    round_f32_to_bf16_in_place(values.data(), values.size());
+}
+
 void write_tensor_i32(const TensorValue & tensor, const int32_t * values, size_t count) {
     if (tensor.type != GGML_TYPE_I32) {
         throw std::runtime_error("write_tensor_i32 requires GGML_TYPE_I32 tensor");
@@ -575,6 +690,43 @@ std::vector<float> read_tensor_bf16(const ggml_tensor * tensor) {
     std::vector<float> values;
     read_tensor_bf16_into(tensor, values);
     return values;
+}
+
+void read_tensor_float_into(const ggml_tensor * tensor, std::vector<float> & values) {
+    switch (tensor->type) {
+        case GGML_TYPE_F32:
+            read_tensor_f32_into(tensor, values);
+            return;
+        case GGML_TYPE_F16:
+            read_tensor_f16_into(tensor, values);
+            return;
+        case GGML_TYPE_BF16:
+            read_tensor_bf16_into(tensor, values);
+            return;
+        default:
+            throw std::runtime_error("read_tensor_float supports only f32/f16/bf16 tensors");
+    }
+}
+
+std::vector<float> read_tensor_float(const ggml_tensor * tensor) {
+    std::vector<float> values;
+    read_tensor_float_into(tensor, values);
+    return values;
+}
+
+void read_tensor_bytes_into(const ggml_tensor * tensor, std::vector<std::byte> & bytes) {
+    if (tensor == nullptr) {
+        throw std::runtime_error("read_tensor_bytes requires non-null tensor");
+    }
+    const size_t byte_count = static_cast<size_t>(ggml_nbytes(tensor));
+    bytes.resize(byte_count);
+    ggml_backend_tensor_get(tensor, bytes.data(), 0, byte_count);
+}
+
+std::vector<std::byte> read_tensor_bytes(const ggml_tensor * tensor) {
+    std::vector<std::byte> bytes;
+    read_tensor_bytes_into(tensor, bytes);
+    return bytes;
 }
 
 void read_tensor_i32_into(const ggml_tensor * tensor, std::vector<int32_t> & values) {

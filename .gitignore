@@ -13,13 +13,18 @@ compile_commands.json
 *.exe
 __pycache__/
 *.pyc
+/venv/
+/.venv/
 /tests/assets/**/*.safetensors
+/tests/omnivoice/outputs/
 /unittests/
 /models/
+/granite5asr/
 /reference/
 /resources/
 /patches/
 /target_proj/
+/tools_local/
 /nocommit/
 /perf/
 /logs/
@@ -32,6 +37,7 @@ __pycache__/
 # --- portable bundle: distributed manually, never committed ---
 /audiocpp-portable/
 
+<<<<<<< HEAD
 # --- WebUI runtime artifacts: keep the source + empty dirs, drop generated files ---
 /webui/output/*
 !/webui/output/.gitkeep
@@ -46,3 +52,12 @@ __pycache__/
 
 # --- ECAPA speaker-encoder validation artifacts: local-only test fixtures ---
 /.validation/
+=======
+# --- Native WebUI build artifacts ---
+/webui/native/node_modules/
+/webui/native/.svelte-kit/
+/webui/native/dist/*
+!/webui/native/dist/index.html
+
+audio-vtest-*
+>>>>>>> origin/main

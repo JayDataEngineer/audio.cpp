@@ -65,7 +65,7 @@ struct SupertonicChunkOutput {
 
 constexpr size_t kSupertonicDurationArenaBytes = 256ull * 1024ull * 1024ull;
 constexpr size_t kSupertonicTextArenaBytes = 1024ull * 1024ull * 1024ull;
-constexpr size_t kSupertonicVectorArenaBytes = 8192ull * 1024ull * 1024ull;
+constexpr size_t kSupertonicVectorArenaBytes = 32ull * 1024ull * 1024ull;
 constexpr size_t kSupertonicVocoderArenaBytes = 2048ull * 1024ull * 1024ull;
 constexpr size_t kSupertonicIoArenaBytes = 64ull * 1024ull * 1024ull;
 constexpr int kSupertonicVectorStepsPerGraph = 1;
@@ -340,7 +340,7 @@ std::shared_ptr<const SupertonicBackendWeights> load_backend_weights(
     for (const auto & metadata : tensors) {
         const auto & name = metadata.name;
         const ggml_type source_type = assets::ggml_type_for_tensor_dtype(metadata.dtype);
-        if (source_type == GGML_TYPE_F32 || source_type == GGML_TYPE_F16 || source_type == GGML_TYPE_BF16) {
+        if (source_type != GGML_TYPE_I64) {
             const auto tensor_storage_type = storage_type_for_weight(name, weight_storage_type);
             core::TensorValue tensor;
             if (tensor_storage_type == assets::TensorStorageType::Q8_0 && is_reshaped_linear_weight(name)) {
@@ -358,9 +358,6 @@ std::shared_ptr<const SupertonicBackendWeights> load_backend_weights(
             }
             weights->tensors.emplace(name, tensor);
             continue;
-        }
-        if (source_type != GGML_TYPE_I64) {
-            throw std::runtime_error("Supertonic unsupported weight dtype: " + metadata.dtype);
         }
     }
     weights->store->upload();

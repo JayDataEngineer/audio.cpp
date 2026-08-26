@@ -248,7 +248,7 @@ def maybe_absolute_path(value: Any) -> Any:
     path = Path(value)
     if path.is_absolute():
         return value
-    if value.startswith(("resources/", "models/", "build/", "reference/")):
+    if value.startswith(("assets/", "resources/", "models/", "build/", "reference/")):
         return str(REPO_ROOT / path)
     return value
 
@@ -296,6 +296,8 @@ def materialize_request_paths(request: dict[str, Any]) -> dict[str, Any]:
         options = dict(out["options"])
         for key, value in options.items():
             if key.endswith("_path") or key.endswith("_file") or key.endswith(".path") or key.endswith(".file"):
+                options[key] = maybe_absolute_path(value)
+            elif key in {"video", "controlfoley.video"}:
                 options[key] = maybe_absolute_path(value)
             elif key in {"voice_samples", "vibevoice.voice_samples"}:
                 options[key] = maybe_absolute_path_list(value)
@@ -433,9 +435,12 @@ def verify_case(case: dict[str, Any], case_dir: Path, stdout: str) -> None:
     if "artifact" in outputs and "artifact_out[" not in stdout:
         raise RuntimeError(f"{case['id']} did not write an artifact json")
     if "artifact" in outputs:
-        artifacts = list((case_dir / "outputs").rglob("*.json"))
-        if not artifacts or not any(path.stat().st_size > 2 for path in artifacts):
-            raise RuntimeError(f"{case['id']} did not produce artifact json")
+        artifacts = [
+            path for path in (case_dir / "outputs").rglob("*")
+            if path.is_file() and path.name not in {"stdout.log", "stderr.log"}
+        ]
+        if not artifacts or not any(path.stat().st_size > 0 for path in artifacts):
+            raise RuntimeError(f"{case['id']} did not produce a non-empty artifact file")
     for kind, filename in (("segments", "segments"), ("turns", "turns"), ("words", "words")):
         if kind not in outputs:
             continue

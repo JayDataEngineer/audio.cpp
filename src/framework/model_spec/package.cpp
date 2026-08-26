@@ -7,11 +7,13 @@
 
 #include <algorithm>
 #include <cctype>
+#include <iostream>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace engine::model_spec {
@@ -21,6 +23,7 @@ thread_local std::optional<std::filesystem::path> active_model_spec_override;
 thread_local std::optional<std::filesystem::path> active_model_path;
 thread_local bool active_embedded_spec_checked = false;
 thread_local std::optional<assets::GgufEmbeddedModelSpec> active_embedded_spec;
+thread_local std::unordered_set<std::string> legacy_embedded_contract_warnings;
 
 const std::unordered_map<std::string, std::string_view> & builtin_model_specs() {
     static const std::unordered_map<std::string, std::string_view> specs = {
@@ -57,39 +60,40 @@ bool is_gguf_file(const std::filesystem::path & path) {
     return extension == ".gguf";
 }
 
-std::vector<std::string> directory_gguf_files(const std::filesystem::path & path) {
-    std::vector<std::string> files;
-    if (!engine::io::is_existing_directory(path)) {
-        return files;
-    }
-    for (const auto & entry : std::filesystem::directory_iterator(path)) {
-        const auto candidate = entry.path();
-        if (is_gguf_file(candidate)) {
-            files.push_back(candidate.filename().string());
+std::string gguf_file_list(const std::vector<std::filesystem::path> & files) {
+    std::string names;
+    for (size_t i = 0; i < files.size(); ++i) {
+        if (i != 0) {
+            names += ", ";
         }
+        names += files[i].filename().string();
     }
-    std::sort(files.begin(), files.end());
-    return files;
+    return names;
+}
+
+// Only fires for a directory holding several GGUFs and no model.gguf to pick between them
+// (e.g. both vevo2-q8_0.gguf and vevo2-f16.gguf installed side by side).
+std::string ambiguous_directory_gguf_message(const std::filesystem::path & directory,
+    const std::vector<std::filesystem::path> & files) {
+    return "model directory contains " + std::to_string(files.size()) + " GGUF files: " + directory.string() +
+           "; found: " + gguf_file_list(files) +
+           "; pass one of them directly with --model, or keep a single GGUF in the directory";
 }
 
 std::string directory_gguf_hint(std::string_view family) {
     if (!active_model_path.has_value()) {
         return {};
     }
-    const auto files = directory_gguf_files(*active_model_path);
+    const auto files = assets::directory_gguf_files(*active_model_path);
     if (files.empty()) {
         return {};
     }
-    std::string message = "model directory has no default GGUF for family '" + std::string(family) +
-                          "': " + active_model_path->string() + "; found: ";
-    for (size_t i = 0; i < files.size(); ++i) {
-        if (i != 0) {
-            message += ", ";
-        }
-        message += files[i];
+    if (files.size() > 1) {
+        return ambiguous_directory_gguf_message(*active_model_path, files);
     }
-    message += "; pass the GGUF file directly with --model, or rename it to model.gguf";
-    return message;
+    return "GGUF has no embedded model spec for family '" + std::string(family) + "': " +
+           files.front().string() + "; install model_specs/" + std::string(family) +
+           ".json next to it, or pass --model-spec-override";
 }
 
 std::optional<std::filesystem::path> active_gguf_path() {
@@ -99,8 +103,8 @@ std::optional<std::filesystem::path> active_gguf_path() {
     if (is_gguf_file(path)) {
         return std::filesystem::weakly_canonical(path);
     }
-    if (engine::io::is_existing_directory(path) && engine::io::is_existing_file(path / "model.gguf")) {
-        return std::filesystem::weakly_canonical(path / "model.gguf");
+    if (const auto found = assets::find_directory_gguf(path)) {
+        return std::filesystem::weakly_canonical(*found);
     }
     return std::nullopt;
 }
@@ -113,6 +117,27 @@ const std::optional<assets::GgufEmbeddedModelSpec> & embedded_model_spec() {
         }
     }
     return active_embedded_spec;
+}
+
+bool embedded_model_spec_has_v1_contract(
+    const assets::GgufEmbeddedModelSpec & embedded,
+    std::string_view family) {
+    if (embedded.family != family) {
+        throw std::runtime_error("GGUF embeds model spec for family '" + embedded.family + "', not '" +
+                                 std::string(family) + "'");
+    }
+    const auto root = engine::io::json::parse(embedded.json);
+    return root.find("schema_version") != nullptr;
+}
+
+void warn_legacy_embedded_contract(std::string_view family) {
+    if (!legacy_embedded_contract_warnings.emplace(family).second) {
+        return;
+    }
+    std::cerr << "[warning][model_spec] GGUF for family '" << family
+              << "' embeds a legacy model spec. Using the current schema-v1 model contract "
+                 "from the installed audio.cpp runtime for option validation. Regenerate the "
+                 "GGUF to make the package fully standalone.\n";
 }
 
 bool external_spec_matches_family(const std::filesystem::path & path, std::string_view family) {
@@ -137,6 +162,24 @@ std::optional<std::filesystem::path> discover_external_model_spec(std::string_vi
         candidates.push_back(root / "model_spec.json");
         candidates.push_back(root.parent_path() / "model_specs" / (std::string(family) + ".json"));
     }
+    auto cursor = std::filesystem::current_path();
+    while (true) {
+        candidates.push_back(cursor / "model_specs" / (std::string(family) + ".json"));
+        const auto parent = cursor.parent_path();
+        if (parent == cursor || parent.empty())
+            break;
+        cursor = parent;
+    }
+    for (const auto & candidate : candidates) {
+        if (external_spec_matches_family(candidate, family)) {
+            return std::filesystem::weakly_canonical(candidate);
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<std::filesystem::path> discover_workspace_model_spec(std::string_view family) {
+    std::vector<std::filesystem::path> candidates;
     auto cursor = std::filesystem::current_path();
     while (true) {
         candidates.push_back(cursor / "model_specs" / (std::string(family) + ".json"));
@@ -235,7 +278,7 @@ void add_resource_map(assets::ResourceBundle & bundle,
     for (const auto & [id, ref] : map_value->as_object()) {
         const auto path = resolve_resource_ref(roots, ref.as_string());
         if (!engine::io::is_existing_file(path)) {
-            throw std::runtime_error("missing model file '" + id + "': " + path.string());
+            throw std::runtime_error("missing model package file '" + id + "': " + path.string());
         }
         bundle.add_file(id, path);
     }
@@ -270,6 +313,27 @@ void add_tensor_map(assets::ResourceBundle & bundle,
             throw std::runtime_error("missing model tensor source '" + id + "': " + path.string());
         }
         bundle.add_tensor_source(id, path, std::move(prefix));
+    }
+}
+
+// Tensor sources a package may or may not ship. The required `tensors` map is
+// checked eagerly, which is what a package wants for the weights it cannot run
+// without; a family whose variants are separate multi-gigabyte downloads needs
+// the other answer, or installing one variant means downloading all of them.
+// A model that selects a missing variant reports it itself, where it can name
+// the variant instead of a resource id.
+void add_optional_tensor_map(assets::ResourceBundle & bundle,
+    const ResourceRoots & roots,
+    const engine::io::json::Value * map_value) {
+    if (map_value == nullptr || map_value->is_null()) {
+        return;
+    }
+    for (const auto & [id, ref] : map_value->as_object()) {
+        std::string prefix;
+        const auto path = resolve_tensor_source_ref(roots, ref, prefix);
+        if (engine::io::is_existing_file(path)) {
+            bundle.add_tensor_source(id, path, std::move(prefix));
+        }
     }
 }
 
@@ -311,6 +375,7 @@ assets::ResourceBundle load_source(const std::filesystem::path & model_root, con
     add_resource_map(bundle, roots, source.find("files"));
     add_optional_resource_map(bundle, roots, source.find("optional_files"));
     add_tensor_map(bundle, roots, source.find("tensors"));
+    add_optional_tensor_map(bundle, roots, source.find("optional_tensors"));
     return bundle;
 }
 
@@ -319,10 +384,9 @@ std::vector<assets::ResourceFile> discover_safetensors_source_resources(const en
     const ResourceRoots & roots) {
     auto resources = resources_from_resource_map(
         roots, source.find(kind == ResourceKind::Files ? "files" : "tensors"), true);
-    if (kind == ResourceKind::Files) {
-        auto optional = resources_from_resource_map(roots, source.find("optional_files"), false);
-        resources.insert(resources.end(), optional.begin(), optional.end());
-    }
+    auto optional = resources_from_resource_map(
+        roots, source.find(kind == ResourceKind::Files ? "optional_files" : "optional_tensors"), false);
+    resources.insert(resources.end(), optional.begin(), optional.end());
     return resources;
 }
 
@@ -361,9 +425,14 @@ SelectedSource require_selected_source(const std::filesystem::path & model_path,
     }
     const auto & sources = spec.require("sources").as_array();
     const bool explicit_gguf_path = is_gguf_file(model_path);
-    const bool directory_has_gguf =
-        engine::io::is_existing_directory(model_path) && engine::io::is_existing_file(model_path / "model.gguf");
-    const bool use_gguf = explicit_gguf_path || directory_has_gguf;
+    const bool use_gguf = explicit_gguf_path || assets::find_directory_gguf(model_path).has_value();
+    if (!use_gguf) {
+        // A directory whose GGUFs cannot be narrowed down to one would otherwise fall through to
+        // the safetensors source and fail much later on a config file the GGUF package never ships.
+        if (const auto files = assets::directory_gguf_files(model_path); files.size() > 1) {
+            throw std::runtime_error(ambiguous_directory_gguf_message(model_path, files));
+        }
+    }
     for (const auto & source : sources) {
         const auto format = require_source_format(source);
         if ((use_gguf && format == "gguf") || (!use_gguf && format == "safetensors")) {
@@ -397,7 +466,7 @@ ScopedSpecOverride::~ScopedSpecOverride() {
     active_embedded_spec.reset();
 }
 
-std::filesystem::path default_spec_path(std::string_view family) {
+std::filesystem::path default_package_spec_path(std::string_view family) {
     if (active_model_spec_override.has_value()) {
         auto path = *active_model_spec_override;
         if (engine::io::is_existing_directory(path)) {
@@ -428,6 +497,65 @@ std::filesystem::path default_spec_path(std::string_view family) {
                              "' (provide --model-spec-override, embed it in the GGUF, enable "
                              "AUDIOCPP_DEPLOYMENT_BUILD, or install model_specs/" +
                              std::string(family) + ".json)");
+}
+
+std::filesystem::path default_contract_spec_path(std::string_view family) {
+    if (active_model_spec_override.has_value()) {
+        auto path = *active_model_spec_override;
+        if (engine::io::is_existing_directory(path)) {
+            path /= std::string(family) + ".json";
+        }
+        if (!engine::io::is_existing_file(path)) {
+            throw std::runtime_error("model spec override not found: " + path.string());
+        }
+        return std::filesystem::weakly_canonical(path);
+    }
+    bool active_gguf_has_legacy_spec = false;
+    if (const auto gguf = active_gguf_path()) {
+        const auto & embedded = embedded_model_spec();
+        if (!embedded.has_value()) {
+            if (family == "minimax_h3") {
+                if (const auto external = discover_workspace_model_spec(family)) {
+                    return *external;
+                }
+                if (builtin_model_specs().find(std::string(family)) != builtin_model_specs().end()) {
+                    return std::filesystem::path("@builtin") / (std::string(family) + ".json");
+                }
+            }
+            throw std::runtime_error("GGUF for family '" + std::string(family) +
+                                     "' does not embed an audio.cpp model spec: " + gguf->string() +
+                                     ". Published GGUF packages must embed a model spec; regenerate the GGUF "
+                                     "or pass --model-spec-override.");
+        }
+        if (embedded_model_spec_has_v1_contract(*embedded, family)) {
+            return std::filesystem::path("@gguf") / (std::string(family) + ".json");
+        }
+        active_gguf_has_legacy_spec = true;
+        warn_legacy_embedded_contract(family);
+    }
+    if (const auto external = discover_workspace_model_spec(family)) {
+        return *external;
+    }
+    if (builtin_model_specs().find(std::string(family)) != builtin_model_specs().end()) {
+        return std::filesystem::path("@builtin") / (std::string(family) + ".json");
+    }
+    if (const auto hint = directory_gguf_hint(family); !hint.empty()) {
+        throw std::runtime_error(hint);
+    }
+    if (active_gguf_has_legacy_spec) {
+        throw std::runtime_error("GGUF for family '" + std::string(family) +
+                                 "' embeds a legacy model spec, but no current schema-v1 model contract was found. "
+                                 "Install model_specs/" + std::string(family) +
+                                 ".json, enable AUDIOCPP_DEPLOYMENT_BUILD, regenerate the GGUF, "
+                                 "or pass --model-spec-override.");
+    }
+    throw std::runtime_error("model contract spec not found for family '" + std::string(family) +
+                             "' (provide --model-spec-override, install model_specs/" +
+                             std::string(family) + ".json, enable AUDIOCPP_DEPLOYMENT_BUILD, or embed it in the GGUF)");
+}
+
+std::filesystem::path default_spec_path(std::string_view family) {
+    return default_package_spec_path(family);
 }
 
 assets::ResourceBundle load_resource_bundle(

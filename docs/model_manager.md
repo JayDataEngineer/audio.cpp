@@ -1,19 +1,121 @@
 # Model Manager
 
-`tools/model_manager.py` downloads or assembles supported model packages into the
-framework's expected `models/` layout.
+`tools/model_manager_v2.py` downloads supported model packages into the
+framework's expected `models/` layout. It reads package metadata from
+`model_specs/*.json`, which is the current source of truth for default download
+links.
 
-This tool is still useful for safetensors-based packages and a few composite model
-layouts, but it is gradually becoming a legacy path as audio.cpp moves toward
-standalone GGUF packages.
+The same package surface is also available through the reusable native C++
+`audiocpp_package_manager` library. Two native frontends use that library:
 
-If a model has a ready-to-use GGUF package, prefer that route first.
+- `audiocpp_server` exposes asynchronous management endpoints for the embedded
+  WebUI.
+- `audiocpp_model_manager` provides direct headless/CLI and Docker access
+  without starting a server.
+
+The Python v2 manager remains a supported alternative for existing scripted
+workflows while the native command surface matures.
+
+## Opt-in Native Network Backend
+
+Native model management is disabled by default so ordinary CLI and server
+builds do not configure, fetch, compile, or link an HTTP/TLS dependency. Enable
+it explicitly to build the reusable library, standalone manager, and server
+download/install endpoints:
+
+```bash
+cmake -S . -B build -DAUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=ON
+cmake --build build --target audiocpp_model_manager audiocpp_server
+```
+
+With build helper scripts, use the native-manager flag:
+
+```bash
+./scripts/build_linux.sh --backend cuda --native-model-manager --target audiocpp_server
+```
+
+```powershell
+.\scripts\build_windows.ps1 -NativeModelManager -Target audiocpp_server
+```
+
+Run the managed WebUI with:
+
+```bash
+audiocpp_server --ui --ui-management --backend cuda
+```
+
+The enabled native library, server, and standalone manager share one vendored
+`cpp-httplib` transport on Windows, Linux, and macOS. HTTPS is enabled with a
+pinned BoringSSL release that is fetched at configure time and linked
+statically. The resulting executables do not require libcurl, a system OpenSSL
+development package, or separate TLS DLLs at runtime.
+
+Offline and sandboxed builds may provide the same verified source archive with
+`-DAUDIOCPP_BORINGSSL_ARCHIVE=/path/to/boringssl.tar.gz`. The Nix package does
+this through a fixed-output derivation, so its CMake phase never accesses the
+network.
+
+With build helper scripts, use `--boringssl-archive <path>` on Linux/macOS or
+`-BoringSslArchive <path>` on Windows.
+
+Packagers that prefer their distribution's OpenSSL can select it explicitly:
+
+```bash
+cmake -S . -B build \
+  -DAUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=ON \
+  -DAUDIOCPP_USE_SYSTEM_OPENSSL=ON
+```
+
+With build helper scripts, use `--system-openssl` on Linux/macOS or
+`-SystemOpenSsl` on Windows.
+
+When using system OpenSSL on machines with multiple OpenSSL installations, make
+sure CMake resolves the distribution OpenSSL that will also be available where
+the binary runs. Bundled BoringSSL is the simpler portable choice for normal
+local builds and release images.
+
+## Native Standalone Manager
+
+The native executable embeds the active `model_specs/*.json` catalog. An
+external `model_specs/` below `--repository-root` is an optional development
+override, not a deployment requirement.
+
+```bash
+audiocpp_model_manager list
+audiocpp_model_manager list --remote
+audiocpp_model_manager info qwen3_asr_0_6b_q8_0 --remote
+audiocpp_model_manager install qwen3_asr_0_6b_q8_0 --models-dir models
+audiocpp_model_manager clean qwen3_asr_0_6b_q8_0 --models-dir models
+audiocpp_model_manager remove qwen3_asr_0_6b_q8_0 --models-dir models
+```
+
+`list` and `info` return machine-readable JSON. Native installation uses the
+same downloader, staging, size validation, atomic publication, shared-sidecar,
+and version metadata logic as the server/WebUI.
+
+For a container image, no server process is required:
+
+```dockerfile
+RUN audiocpp_model_manager install qwen3_asr_0_6b_q8_0 --models-dir /models
+```
+
+```text
+                     +-- audiocpp_server -> REST API / native WebUI
+model_specs/*.json -> audiocpp_package_manager
+                     +-- audiocpp_model_manager -> CLI / Docker / scripts
+```
+
+When a family has a ready-to-use GGUF package, the default install should be that
+GGUF package. The old safetensors/converter catalog is still available as
+`tools/model_manager_deprecated.py`, but it is a legacy path for models that have
+not migrated to spec-backed packages.
 
 ## GGUF Downloads
 
 Ready-to-use GGUF packages are published here:
 
 - Core released models: [audio-cpp/audio.cpp-gguf](https://huggingface.co/audio-cpp/audio.cpp-gguf)
+- Fun-ASR-Nano: [FunAudioLLM/Fun-ASR-Nano-2512-GGUF](https://huggingface.co/FunAudioLLM/Fun-ASR-Nano-2512-GGUF)
 - Community OuteTTS package: [mirek190/audio.cpp](https://huggingface.co/mirek190/audio.cpp/tree/main/Text%20to%20audio%20(TTS))
 
 For support status and tested precision coverage, see the [GGUF guide](gguf.md).
@@ -22,19 +124,48 @@ For measured 16-bit vs Q8 speed and peak-VRAM results, see the
 
 ## Dependencies
 
+The native manager needs no Python runtime. The default bundled-TLS build needs
+network access at CMake configure time to fetch the pinned BoringSSL source
+archive, unless `AUDIOCPP_BORINGSSL_ARCHIVE` points at a local copy. Runtime
+model installation needs network access to the package source, usually Hugging
+Face.
+
+The Python v2 manager needs:
+
 - Python 3
-- `torch`
-- `safetensors`
-- `PyYAML`
 - Network access to the upstream model source
 
-## Commands
+Legacy converter installs through `tools/model_manager_deprecated.py` may also
+need `torch`, `safetensors`, `PyYAML`, or model-specific conversion inputs.
+
+## Native Commands
+
+`audiocpp_model_manager` supports the same package ids as the managed WebUI:
+
+- `list` shows the available package ids
+- `list --remote` includes remote availability and package-size metadata where
+  available
+- `info <package>` shows one package's install status and metadata
+- `info <package> --remote` also checks the remote package source
+- `install <package>` downloads one package into a models root
+- `clean <package>` removes incomplete staging data for one package
+- `remove <package>` removes the files managed by one installed package
+
+Use `--models-dir PATH` to select the installation root. Use
+`--repository-root PATH` only when developing against an external
+`model_specs/` override; normal deployed binaries use the embedded catalog.
+
+## Python v2 Commands
 
 - `list` shows the available package ids
 - `list --json` prints a machine-readable package catalog
 - `info` shows the target layout, required files, and install source for one package
 - `info <package> --json` prints machine-readable package details
 - `install` downloads or converts one package into a models root
+- `installed --json` reports package-file presence without network access
+- `sizes --json` reports remote sizes plus local/remote revision status
+- `uninstall` removes only files declared by one package precision
+- `clean-partial` removes abandoned staging directories left by an interrupted process
 
 The runtime loader catalog is also available from:
 
@@ -47,97 +178,78 @@ audiocpp_cli --list-loaders --json
 List installable packages:
 
 ```bash
-python3 tools/model_manager.py list
+python3 tools/model_manager_v2.py list
 ```
 
 Inspect one package:
 
 ```bash
-python3 tools/model_manager.py info qwen3_tts_1_7b_base
+python3 tools/model_manager_v2.py info qwen3_tts
 ```
 
 Install into the default `models/` directory:
 
 ```bash
-python3 tools/model_manager.py install qwen3_tts_1_7b_base
+python3 tools/model_manager_v2.py install qwen3_tts
 ```
 
 Install into a custom models root:
 
 ```bash
-python3 tools/model_manager.py install vevo2 --models-root /path/to/models
+python3 tools/model_manager_v2.py install vevo2 --models-root /path/to/models
 ```
 
 Overwrite an existing install:
 
 ```bash
-python3 tools/model_manager.py install pocket_tts --overwrite
+python3 tools/model_manager_v2.py install pocket_tts --overwrite
 ```
+
+Successful installs write a small `.audiocpp-package-<id>.json` manifest beside
+the package files. It records the resolved Hugging Face commit and enables the
+native WebUI to report whether the local package is current. Packages installed
+before this metadata existed remain usable and show `Version unknown` until they
+are reinstalled once.
+
+Clean staging directories left by a process or machine interruption:
+
+```bash
+python3 tools/model_manager_v2.py clean-partial pocket_tts --models-root models
+```
+
+The native WebUI can stop an active download cooperatively. Its worker checks a
+cancellation marker between download chunks and deletes its staging directory
+before reporting the job as cancelled.
+
+Package variants may declare an identical sidecar at the same destination. The
+manager downloads that file once, reuses it when installing a sibling precision,
+and keeps it until the last package that declares it is removed. PocketTTS uses
+this for the public `alba` preset shared by its English Q8 and BF16 packages.
 
 Install a converter-style package that needs a source file:
 
 ```bash
-python3 tools/model_manager.py info voxcpm2_audiovae
-python3 tools/model_manager.py install voxcpm2_audiovae --source-file models/VoxCPM2/audiovae.pth --models-root models --overwrite
+python3 tools/model_manager_deprecated.py info voxcpm2_audiovae
+python3 tools/model_manager_deprecated.py install voxcpm2_audiovae --source-file models/VoxCPM2/audiovae.pth --models-root models --overwrite
 ```
+
+Kroko Community defaults to the ready-to-use GGUF package:
+
+```bash
+python3 tools/model_manager_v2.py install kroko_asr_community_q8_0 --models-root models --overwrite
+```
+
+The original Kroko `.data` conversion workflow remains documented in the
+community model guide for users who want to build from the upstream source
+package themselves.
 
 ## Package Notes
 
-For shared audio.cpp GGUF packages, the model manager installs the default `q8_0`
-GGUF. Other precision variants can be downloaded directly from
+For shared audio.cpp GGUF packages, the v2 model manager installs the default GGUF.
+That is usually `q8_0`; FP32-only packages such as Inflect Micro v2 use
+original dtype instead. Other precision variants can be downloaded directly from
 [audio-cpp/audio.cpp-gguf](https://huggingface.co/audio-cpp/audio.cpp-gguf).
 
-`Yes` means Hugging Face has a ready-to-use repo that the framework can download
-as-is. `No` means the tool must assemble, convert, or post-process files before the
-framework can use them.
-
-Packages whose loaders are not registered in the current release tree are listed as
-**Unavailable**; see [loader/catalog sync notes](maintainers/loader_and_catalog.md).
-
-| Package id | Model | HF ready-to-use repo |
-|---|---|---|
-| `ace_step` | ACE-Step 1.5 Turbo/Base | No |
-| `chatterbox` | Chatterbox | **Yes** |
-| `citrinet_asr` | Citrinet ASR converted layout | No |
-| `fish_audio_s2_pro` | Fish Audio S2 Pro GGUF Q8_0 | **Yes** |
-| `glm_tts` | GLM-TTS with converted Flow/HiFT/tokenizer and CAMPPlus assets | No |
-| `heartmula` | HeartMuLa | No |
-| `higgs_audio_stt` | Higgs Audio STT | No |
-| `higgs_audio_v3_tts_4b` | Higgs Audio v3 TTS 4B GGUF Q8_0 | **Yes** |
-| `htdemucs` | HTDemucs | No |
-| `hviske_asr` | Hviske ASR | **Yes** |
-| `irodori_tts_500m_v3` | Irodori-TTS 500M v3 | No |
-| `irodori_tts_600m_v3_voice_design` | Irodori-TTS 600M v3 VoiceDesign | No |
-| `index_tts2` | IndexTTS-2 | **Yes** |
-| `mel_band_roformer` | Mel-Band RoFormer MLX | **Yes** |
-| `miocodec_25hz_44k_v2` | MioCodec 25Hz 44.1kHz v2 | No |
-| `miotts_1_7b` | MioTTS 1.7B | No |
-| `moss_audio_tokenizer_nano` | MOSS Audio Tokenizer Nano | No |
-| `moss_audio_tokenizer_v2` | MOSS Audio Tokenizer v2 | No |
-| `moss_tts_nano_100m` | MOSS-TTS-Nano 100M | No |
-| `moss_tts_nano_100m_model` | MOSS-TTS-Nano 100M model subcomponent | No |
-| `moss_tts_local_v1_5` | MOSS-TTS-Local Transformer v1.5 | No |
-| `nemotron_asr` | Nemotron ASR | **Yes** |
-| `omnivoice` | OmniVoice | **Yes** |
-| `outetts_1_0_1b` | OuteTTS 1.0 1B with IBM DAC codec and Qwen3-aligned voice cloning | No |
-| `pocket_tts` | PocketTTS | **Yes** |
-| `qwen3_asr_0_6b` | Qwen3 ASR 0.6B | **Yes** |
-| `qwen3_asr_1_7b_hf` | Qwen3 ASR 1.7B HF | **Yes** |
-| `qwen3_forced_aligner_0_6b` | Qwen3 Forced Aligner 0.6B | **Yes** |
-| `qwen3_tts_0_6b_base` | Qwen3 TTS 12Hz 0.6B Base | **Yes** |
-| `qwen3_tts_1_7b_base` | Qwen3 TTS 12Hz 1.7B Base | **Yes** |
-| `qwen3_tts_1_7b_custom_voice` | Qwen3 TTS 12Hz 1.7B Custom Voice | **Yes** |
-| `qwen3_tts_1_7b_voice_design` | Qwen3 TTS 12Hz 1.7B Voice Design | **Yes** |
-| `seed_vc` | SeedVC-MLX | **Yes** |
-| `sortformer_diar_4spk_v1` | Sortformer diarization 4 speaker v1 | **Yes** |
-| `stable_audio_3_medium` | Stable Audio 3 Medium | **Yes** |
-| `stable_audio_3_small_music` | Stable Audio 3 Small Music | **Yes** |
-| `stable_audio_3_small_sfx` | Stable Audio 3 Small SFX | **Yes** |
-| `supertonic_3` | Supertonic 3 | **Yes** |
-| `vevo2` | VeVo2 | No |
-| `vietneu_tts_v3_turbo` | VieNeu-TTS v3 Turbo | **Yes** |
-| `vibevoice_1_5b` | VibeVoice 1.5B | **Yes** |
-| `vibevoice_7b` | VibeVoice 7B | **Yes** |
-| `vibevoice_asr` | VibeVoice ASR | **Yes** |
-| `voxcpm2` | VoxCPM2 | No |
-| `voxtral_realtime` | Voxtral Mini 4B Realtime GGUF Q8_0 | **Yes** |
+Use `python3 tools/model_manager_v2.py list --json` for the current package
+ids and defaults. The legacy loader/catalog sync notes are maintained only for
+the deprecated catalog path.

@@ -15,6 +15,11 @@ CLEAN="OFF"
 LLAMAFILE="ON"
 NATIVE_CPU="ON"
 AUDIOCPP_DEPLOYMENT_BUILD="OFF"
+AUDIOCPP_BUILD_NATIVE_MODEL_MANAGER="OFF"
+AUDIOCPP_USE_SYSTEM_OPENSSL="OFF"
+AUDIOCPP_BORINGSSL_ARCHIVE=""
+AUDIOCPP_MODEL_SET="full"
+AUDIOCPP_MODELS=""
 
 usage() {
     cat <<'EOF'
@@ -41,6 +46,17 @@ Options:
   --native-cpu ON|OFF   Build ggml CPU kernels with native host ISA flags.
                         Default: ON
   --deployment-build    Embed package specs for standalone GGUF/model loading.
+  --native-model-manager
+                        Build native model manager and managed WebUI downloads.
+  --system-openssl      Use system OpenSSL for native model management.
+  --boringssl-archive <path>
+                        Use a local BoringSSL source archive for native model
+                        management instead of downloading at configure time.
+  --model-set full|core|custom
+                        Model composite to build.
+                        Default: full
+  --models "<list>"     Comma or semicolon separated model targets when
+                        --model-set custom is used.
   -j, --jobs <n>        Parallel build jobs.
   -h, --help            Show this help.
 
@@ -93,6 +109,34 @@ while [[ $# -gt 0 ]]; do
             AUDIOCPP_DEPLOYMENT_BUILD="ON"
             shift
             ;;
+        --native-model-manager)
+            AUDIOCPP_BUILD_NATIVE_MODEL_MANAGER="ON"
+            shift
+            ;;
+        --system-openssl)
+            AUDIOCPP_USE_SYSTEM_OPENSSL="ON"
+            shift
+            ;;
+        --boringssl-archive)
+            AUDIOCPP_BORINGSSL_ARCHIVE="$2"
+            shift 2
+            ;;
+        --model-set)
+            case "$2" in
+                full|core|custom)
+                    AUDIOCPP_MODEL_SET="$2"
+                    ;;
+                *)
+                    echo "--model-set must be full, core, or custom" >&2
+                    exit 1
+                    ;;
+            esac
+            shift 2
+            ;;
+        --models)
+            AUDIOCPP_MODELS="$2"
+            shift 2
+            ;;
         -j|--jobs)
             JOBS="$2"
             shift 2
@@ -108,6 +152,17 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+if [[ "$AUDIOCPP_BUILD_NATIVE_MODEL_MANAGER" != "ON" ]]; then
+    if [[ "$AUDIOCPP_USE_SYSTEM_OPENSSL" == "ON" ]]; then
+        echo "--system-openssl requires --native-model-manager" >&2
+        exit 1
+    fi
+    if [[ -n "$AUDIOCPP_BORINGSSL_ARCHIVE" ]]; then
+        echo "--boringssl-archive requires --native-model-manager" >&2
+        exit 1
+    fi
+fi
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
     echo "audio.cpp XCFramework builds require macOS." >&2
@@ -192,8 +247,16 @@ archive_for_arch() {
         -DGGML_METAL_EMBED_LIBRARY=ON \
         -DENGINE_BUILD_TESTS=OFF \
         -DENGINE_BUILD_EXAMPLES=OFF \
-        -DAUDIOCPP_DEPLOYMENT_BUILD="$AUDIOCPP_DEPLOYMENT_BUILD"
+        -DAUDIOCPP_DEPLOYMENT_BUILD="$AUDIOCPP_DEPLOYMENT_BUILD" \
+        -DAUDIOCPP_BUILD_NATIVE_MODEL_MANAGER="$AUDIOCPP_BUILD_NATIVE_MODEL_MANAGER" \
+        -DAUDIOCPP_USE_SYSTEM_OPENSSL="$AUDIOCPP_USE_SYSTEM_OPENSSL" \
+        -UAUDIOCPP_BORINGSSL_ARCHIVE \
+        -DAUDIOCPP_MODEL_SET="$AUDIOCPP_MODEL_SET" \
+        -DAUDIOCPP_MODELS="$AUDIOCPP_MODELS"
     )
+    if [[ -n "$AUDIOCPP_BORINGSSL_ARCHIVE" ]]; then
+        cmake_cmd+=(-DAUDIOCPP_BORINGSSL_ARCHIVE="$AUDIOCPP_BORINGSSL_ARCHIVE")
+    fi
     if [[ -n "$GENERATOR" ]]; then
         cmake_cmd+=(-G "$GENERATOR")
     fi

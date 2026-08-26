@@ -6,6 +6,7 @@
 
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 namespace engine::modules {
 
@@ -71,6 +72,36 @@ core::TensorValue repeat_first_frame(
     int64_t prefix_frames) {
     auto first = SliceModule({2, 0, 1}).build(ctx, input);
     return RepeatModule({core::TensorShape::from_dims({input.shape.dims[0], input.shape.dims[1], prefix_frames})}).build(ctx, first);
+}
+
+core::TensorValue zeros_like_suffix(
+    core::ModuleBuildContext & ctx,
+    const core::TensorValue & input,
+    int64_t suffix_frames) {
+    auto suffix = RepeatModule({core::TensorShape::from_dims({input.shape.dims[0], input.shape.dims[1], suffix_frames})})
+                      .build(ctx, SliceModule({2, input.shape.dims[2] - 1, 1}).build(ctx, input));
+    auto suffix_contiguous = tensor_layout::ensure_contiguous_layout_if_needed(ctx, suffix);
+    return core::wrap_tensor(ggml_scale(ctx.ggml, suffix_contiguous.tensor, 0.0f), suffix.shape, GGML_TYPE_F32);
+}
+
+core::TensorValue repeat_last_frame(
+    core::ModuleBuildContext & ctx,
+    const core::TensorValue & input,
+    int64_t suffix_frames) {
+    auto last = SliceModule({2, input.shape.dims[2] - 1, 1}).build(ctx, input);
+    return RepeatModule({core::TensorShape::from_dims({input.shape.dims[0], input.shape.dims[1], suffix_frames})}).build(ctx, last);
+}
+
+std::pair<int64_t, int64_t> streaming_conv1d_padding(const StreamingConv1dConfig & config, int64_t effective_kernel) {
+    switch (config.padding_mode) {
+        case StreamingConv1dPaddingMode::StreamingSame:
+            return {effective_kernel - config.stride, 0};
+        case StreamingConv1dPaddingMode::StrictCausal:
+            return {effective_kernel - 1, 0};
+        case StreamingConv1dPaddingMode::Explicit:
+            return {config.explicit_left, config.explicit_right};
+    }
+    throw std::runtime_error("StreamingConv1dModule unknown padding mode");
 }
 
 }
@@ -175,6 +206,9 @@ StreamingConv1dModule::StreamingConv1dModule(StreamingConv1dConfig config) : con
     if (config_.stride <= 0 || config_.dilation <= 0) {
         throw std::runtime_error("StreamingConv1d stride and dilation must be positive");
     }
+    if (config_.explicit_left < 0 || config_.explicit_right < 0) {
+        throw std::runtime_error("StreamingConv1d explicit padding must be non-negative");
+    }
 }
 
 core::TensorValue StreamingConv1dModule::build(
@@ -182,9 +216,9 @@ core::TensorValue StreamingConv1dModule::build(
     const core::TensorValue & input,
     const StreamingConv1dWeights & weights) const {
     const int64_t effective_kernel = (config_.kernel_size - 1) * config_.dilation + 1;
-    const int64_t left_pad = effective_kernel - config_.stride;
-    if (left_pad < 0) {
-        throw std::runtime_error("StreamingConv1dModule requires effective_kernel >= stride");
+    const auto [left_pad, right_pad] = streaming_conv1d_padding(config_, effective_kernel);
+    if (left_pad < 0 || right_pad < 0) {
+        throw std::runtime_error("StreamingConv1dModule computed negative padding");
     }
     if (input.shape.dims[2] <= 0) {
         throw std::runtime_error("StreamingConv1dModule input must have frames");
@@ -196,6 +230,12 @@ core::TensorValue StreamingConv1dModule::build(
             ? repeat_first_frame(ctx, input, left_pad)
             : zeros_like_prefix(ctx, input, left_pad);
         padded = ConcatModule({2}).build(ctx, prefix, input);
+    }
+    if (right_pad > 0) {
+        core::TensorValue suffix = config_.pad_mode == StreamingPadMode::Replicate
+            ? repeat_last_frame(ctx, input, right_pad)
+            : zeros_like_suffix(ctx, input, right_pad);
+        padded = ConcatModule({2}).build(ctx, padded, suffix);
     }
     return Conv1dModule({
         config_.in_channels,
@@ -221,23 +261,72 @@ core::TensorValue DepthwiseConvTranspose1dModule::build(
     core::ModuleBuildContext & ctx,
     const core::TensorValue & input,
     const DepthwiseConvTranspose1dWeights & weights) const {
-    core::validate_shape(weights.weight, core::TensorShape::from_dims({config_.channels, 1, config_.kernel_size}), "weight");
-
-    core::TensorValue output;
-    for (int64_t channel = 0; channel < config_.channels; ++channel) {
-        auto input_channel = SliceModule({1, channel, 1}).build(ctx, input);
-        auto weight_channel = SliceModule({0, channel, 1}).build(ctx, weights.weight);
-        auto channel_out = ConvTranspose1dModule({
-            1,
-            1,
-            config_.kernel_size,
-            config_.stride,
-            0,
-            1,
-            false,
-        }).build(ctx, input_channel, ConvTranspose1dWeights{weight_channel, std::nullopt});
-        output = output.valid() ? ConcatModule({1}).build(ctx, output, channel_out) : channel_out;
+    if (ctx.ggml == nullptr) {
+        throw std::runtime_error("ModuleBuildContext.ggml is null");
     }
+    core::validate_rank_between(input, 2, 3, "input");
+    const bool channel_time_layout = input.shape.rank == 2;
+    const int64_t frames = channel_time_layout ? input.shape.dims[1] : input.shape.dims[2];
+    if (channel_time_layout) {
+        core::validate_shape(input, core::TensorShape::from_dims({config_.channels, frames}), "input");
+    } else {
+        core::validate_shape(input, core::TensorShape::from_dims({1, config_.channels, frames}), "input");
+    }
+    core::validate_shape(
+        weights.weight,
+        core::TensorShape::from_dims({config_.channels, 1, 1, config_.kernel_size}),
+        "weight");
+
+    const auto x = core::ensure_backend_addressable_layout(ctx, input);
+    ggml_tensor * x3 = ggml_reshape_3d(ctx.ggml, x.tensor, 1, frames, config_.channels);
+    ggml_tensor * zero3 = ggml_scale(ctx.ggml, x3, 0.0F);
+    ggml_tensor * interleaved3 = x3;
+    for (int index = 1; index < config_.stride; ++index) {
+        interleaved3 = ggml_concat(ctx.ggml, interleaved3, zero3, 0);
+    }
+    ggml_tensor * interleaved = ggml_reshape_2d(ctx.ggml, interleaved3, frames * config_.stride, config_.channels);
+    interleaved = ggml_view_2d(
+        ctx.ggml,
+        interleaved,
+        frames * config_.stride - (config_.stride - 1),
+        config_.channels,
+        interleaved->nb[1],
+        0);
+    ggml_tensor * input4 = ggml_reshape_4d(
+        ctx.ggml,
+        core::has_backend_addressable_layout(interleaved) ? interleaved : ggml_cont(ctx.ggml, interleaved),
+        interleaved->ne[0],
+        1,
+        config_.channels,
+        1);
+    ggml_tensor * y4 = ggml_conv_2d_dw_direct(
+        ctx.ggml,
+        weights.weight.tensor,
+        input4,
+        1,
+        1,
+        config_.kernel_size - 1,
+        0,
+        1,
+        1);
+    y4 = core::has_backend_addressable_layout(y4) ? y4 : ggml_cont(ctx.ggml, y4);
+    if (channel_time_layout) {
+        auto output = core::wrap_tensor(
+            ggml_reshape_2d(ctx.ggml, y4, y4->ne[0], config_.channels),
+            core::TensorShape::from_dims({config_.channels, y4->ne[0]}),
+            GGML_TYPE_F32);
+        if (!weights.bias.has_value()) {
+            return output;
+        }
+        auto output_contiguous = tensor_layout::ensure_contiguous_layout_if_needed(ctx, output);
+        auto bias_view = core::reshape_tensor(ctx, *weights.bias, core::TensorShape::from_dims({config_.channels, 1}));
+        auto repeated = core::wrap_tensor(ggml_repeat(ctx.ggml, bias_view.tensor, output_contiguous.tensor), output.shape, GGML_TYPE_F32);
+        return core::wrap_tensor(ggml_add(ctx.ggml, output_contiguous.tensor, repeated.tensor), output.shape, GGML_TYPE_F32);
+    }
+    auto output = core::wrap_tensor(
+        ggml_reshape_3d(ctx.ggml, y4, y4->ne[0], config_.channels, 1),
+        core::TensorShape::from_dims({1, config_.channels, y4->ne[0]}),
+        GGML_TYPE_F32);
     return add_bias_bct(ctx, output, config_.channels, weights.bias);
 }
 

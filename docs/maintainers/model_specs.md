@@ -8,29 +8,65 @@ The only accepted spec shapes are the current source-layout specs already used
 by production models, and the typed schema shown here for new metadata/catalog
 work.
 
+## Migration Trees
+
+`model_specs/*.json` is the authoritative runtime tree. Specs with
+`schema_version: 1` in this directory are active typed specs and participate in
+`model_contract()` validation, embedded GGUF metadata, CLI/server inspection,
+and package discovery.
+
+`model_specs_v1/*.json` is a migration reference tree only. It records the
+expected typed shape for families that have not moved to the v1 runtime contract
+yet. Do not treat it as an active runtime source, and do not assume changes there
+affect loaders, CLI options, server validation, or package installs until the
+family is migrated into `model_specs/` with `schema_version: 1`.
+
+During migration, keep public option keys aligned with the code path that will
+actually consume them. If a live loader still accepts an older public key, either
+migrate the runtime to the normalized key in the same change or keep the legacy
+key out of the active spec until cutover. Avoid creating UI-only aliases.
+
 ## Typed Schema
 
 Top-level fields:
 
-| Field | Meaning |
-|---|---|
-| `schema_version` | Must be `1`. |
-| `family` | Runtime model family id. Must match the filename stem. |
-| `display_name` | User-facing model family name. |
-| `category` | Typed category such as `asr`, `tts`, `audio_generation`, or `community`. |
-| `status` | Typed status: `supported`, `community`, `experimental`, `wip`, or `unsupported`. |
-| `tasks` | Typed task tags such as `asr`, `tts`, `clone`, `vc`, or `align`. |
-| `modes` | Supported run modes: `offline` and/or `streaming`. |
-| `languages` | Family-level language scope, such as `en`, `zh`, `ja`, `multilingual`, or `language_agnostic`. |
-| `runtime` | Runtime tags such as `gguf` or `stream`. |
-| `capabilities` | Stable task-keyed capability tags. |
-| `options` | Typed request/session/load options. |
-| `package_defaults` | Optional shared package metadata, such as a common download source. |
-| `packages` | Installable model packages and download metadata. |
-| `layouts` | Typed resource/tensor layouts for future runtime package loading. |
-| `dependencies` | Runtime peer models or bundled model assets needed for optional features. |
-| `ui` | UI/catalog hints. |
-| `sources` | Temporary runtime bridge for current package-spec loading. |
+| Field | Meaning | Regenerate standalone GGUF if touched? |
+|---|---|---|
+| `schema_version` | Must be `1`. | No |
+| `family` | Runtime model family id. Must match the filename stem. | Yes, if changing an already published family id |
+| `display_name` | User-facing model family name. | No |
+| `category` | Typed category such as `asr`, `tts`, `audio_generation`, `audio_tools`, or `community`. | No |
+| `status` | Typed status: `supported`, `community`, `experimental`, `wip`, or `unsupported`. | No |
+| `tasks` | Typed task tags such as `asr`, `tts`, `clone`, `vc`, `midi`, or `align`. | No |
+| `modes` | Supported run modes: `offline` and/or `streaming`. | No |
+| `languages` | Family-level language scope, such as `en`, `zh`, `ja`, `multilingual`, or `language_agnostic`. | No |
+| `runtime` | Runtime tags such as `gguf` or `stream`. | No |
+| `capabilities` | Stable task-keyed capability tags. | No |
+| `options` | Typed request/session/load options. | Yes, otherwise new code needs compatibility mapping for old embedded specs |
+| `package_defaults` | Optional shared package metadata, such as a common download source. | No |
+| `packages` | Installable model packages and download metadata. | No |
+| `dependencies` | Runtime peer models or bundled model assets needed for optional features. | No, but loader/session behavior must support the dependency |
+| `ui` | UI/catalog hints. | No |
+| `sources` | Canonical runtime resource/tensor mappings. | Yes |
+
+## Metadata vs Runtime Loading
+
+The metadata fields above do not change tensor loading, sidecar lookup, graph
+construction, or inference math.
+
+Changing those fields does not require regenerating or reconverting a GGUF model.
+If a GGUF already embeds an older spec, the old embedded metadata may still be
+what a fully standalone package reports when no external `model_specs/` override
+is available, but the model weights and runtime execution remain valid.
+
+Fields that can affect runtime behavior are `sources`, `options`, and
+`dependencies`. Changing `sources` changes where files or tensors are resolved
+and requires refreshing any standalone GGUF package that relies on the embedded
+spec. Changing `options` changes the typed runtime contract; either regenerate
+standalone GGUF packages with the updated embedded spec, or add explicit
+compatibility mapping in code for packages that still carry the old spec.
+Changing `dependencies` must be reviewed with the loader/session behavior that
+consumes it.
 
 Shared request options must use canonical names such as `seed`, `language`,
 `voice_ref`, `text_chunk_mode`, `text_chunk_size`, `max_tokens`,
@@ -114,10 +150,11 @@ capability beyond the task itself. Keep capabilities typed and concrete:
 }
 ```
 
-Packages are install targets, not runtime layouts. Each package owns its display
-name, precision, target directory, and exact remote files. If several packages
-come from the same repo, put the shared source in `package_defaults.download`
-and keep package-level `download` only for overrides.
+Packages are install targets, not runtime resource maps. Each package owns its
+display name, precision, target directory, and exact remote files. If several
+packages come from the same repo, put the shared source in
+`package_defaults.download` and keep package-level `download` only for
+overrides.
 
 ```json
 {
@@ -154,7 +191,13 @@ runtime option key is derived as `<family>.<option>`.
 Required dependencies are unconditional. Optional dependencies must declare
 typed `required_when` rows. Each row is a condition over a public option key.
 Common request keys such as `return_timestamps` stay unprefixed; model-specific
-keys stay namespaced. The dependency is needed when any row matches.
+session/load keys stay namespaced as `<family>.<name>`. Multiple rows are OR'd:
+the dependency is needed when **any** row matches.
+
+`dependencies[].option` must be a local name that already exists under
+`options.<scope>` for the same dependency `scope`. Each
+`required_when[].option_key` must refer to an option declared under
+`options.<required_when.scope>` (using the public key form above).
 
 ```json
 {
@@ -192,10 +235,9 @@ keys stay namespaced. The dependency is needed when any row matches.
 }
 ```
 
-Supported download kinds are `huggingface_snapshot`, `local_snapshot`,
-`converter`, and `unsupported`. `tools/model_manager_v2.py` intentionally
-installs only simple `huggingface_snapshot` packages; use the legacy manager for
-composite or converter-driven installs.
+Release download packages should use ready-to-run `huggingface_snapshot` GGUF
+entries. Publish a GGUF package first, then expose it through
+`tools/model_manager_v2.py`.
 
 The C++ `framework/model_spec` subsystem is the authoritative schema gate.
 `audiocpp_cli`, `audiocpp_server`, and GGUF loading fail when a typed schema field

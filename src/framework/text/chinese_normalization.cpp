@@ -1,5 +1,8 @@
 #include "engine/framework/text/chinese_normalization.h"
 
+#include "engine/framework/text/text_normalization.h"
+#include "engine/framework/text/utf8.h"
+
 #include <algorithm>
 #include <cctype>
 #include <regex>
@@ -11,18 +14,6 @@
 
 namespace engine::text {
 namespace {
-
-std::string replace_all(std::string text, const std::string & from, const std::string & to) {
-    if (from.empty()) {
-        return text;
-    }
-    size_t pos = 0;
-    while ((pos = text.find(from, pos)) != std::string::npos) {
-        text.replace(pos, from.size(), to);
-        pos += to.size();
-    }
-    return text;
-}
 
 bool is_ascii_digit(char ch) {
     return ch >= '0' && ch <= '9';
@@ -129,9 +120,12 @@ std::string correct_index_tts_pinyin(std::string value) {
                        static_cast<unsigned char>(value[2]) == 0xBCU) {
                 value.replace(1, 2, "v");
             }
+            // The official correct_pinyin only uppercases the j/q/x ü->v cases;
+            // other pinyin keeps its original casing.
+            return uppercase_ascii_and_v(std::move(value));
         }
     }
-    return uppercase_ascii_and_v(std::move(value));
+    return value;
 }
 
 bool is_index_tts_pinyin_candidate(const std::string & candidate) {
@@ -177,7 +171,10 @@ std::vector<std::pair<std::string, std::string>> save_regex_matches(
 
     std::vector<std::pair<std::string, std::string>> saved;
     for (size_t i = 0; i < matches.size(); ++i) {
-        const std::string placeholder = "<" + std::string(placeholder_prefix) + "_" + std::to_string(i) + ">";
+        // Letter suffix like the official TextNormalizer: a digit suffix would be
+        // rewritten by the number normalizer and the placeholder would leak.
+        const std::string placeholder =
+            "<" + std::string(placeholder_prefix) + "_" + static_cast<char>('a' + i % 26) + ">";
         text = replace_all(std::move(text), matches[i], placeholder);
         saved.emplace_back(placeholder, matches[i]);
     }
@@ -218,7 +215,9 @@ std::vector<std::pair<std::string, std::string>> save_pinyin_tones(std::string &
 
     std::vector<std::pair<std::string, std::string>> saved;
     for (size_t i = 0; i < matches.size(); ++i) {
-        const std::string placeholder = "<pinyin_" + std::to_string(i) + ">";
+        // Letter suffix like the official TextNormalizer: a digit suffix would be
+        // rewritten by the number normalizer and the placeholder would leak.
+        const std::string placeholder = "<pinyin_" + std::string(1, static_cast<char>('a' + i % 26)) + ">";
         text = replace_all(std::move(text), matches[i], placeholder);
         saved.emplace_back(placeholder, correct_index_tts_pinyin(matches[i]));
     }
@@ -232,9 +231,35 @@ void restore_saved(std::string & text, const std::vector<std::pair<std::string, 
 }
 
 std::string normalize_chinese_numbers(const std::string & text) {
+    // Measure words after which a standalone "2" reads as 两 (wetext zh
+    // cardinal rule): 两个, 两位, 两只, ...
+    static const char * const kMeasureWords[] = {
+        "个", "位", "只", "条", "张", "本", "件", "次", "台", "辆", "块", "颗",
+        "杯", "瓶", "碗", "套", "把", "支", "根", "座", "间", "群", "双", "对",
+        "种", "类", "项", "层", "栋", "扇", "面", "盏", "袋", "箱", "包", "桶",
+    };
     std::string out;
     out.reserve(text.size());
     for (size_t i = 0; i < text.size();) {
+        // "$50" -> "五十美元" (wetext zh currency rule); consumes the "$".
+        if (text[i] == '$' && i + 1 < text.size() && is_ascii_digit(text[i + 1])) {
+            size_t begin = ++i;
+            while (i < text.size() && is_ascii_digit(text[i])) {
+                ++i;
+            }
+            out += chinese_cardinal_from_digits(text.substr(begin, i - begin));
+            if (i < text.size() && text[i] == '.' && i + 1 < text.size() && is_ascii_digit(text[i + 1])) {
+                size_t decimal_end = i + 1;
+                while (decimal_end < text.size() && is_ascii_digit(text[decimal_end])) {
+                    ++decimal_end;
+                }
+                out += "点";
+                out += chinese_digits_individually(text.substr(i + 1, decimal_end - i - 1));
+                i = decimal_end;
+            }
+            out += "美元";
+            continue;
+        }
         if (!is_ascii_digit(text[i])) {
             out.push_back(text[i++]);
             continue;
@@ -245,6 +270,12 @@ std::string normalize_chinese_numbers(const std::string & text) {
             ++i;
         }
         const std::string digits = text.substr(begin, i - begin);
+        // "100km/h" -> "每小时一百公里" (wetext zh measure rule).
+        if (starts_with_at(text, i, "km/h")) {
+            out += "每小时" + chinese_cardinal_from_digits(digits) + "公里";
+            i += 4;
+            continue;
+        }
         if (i < text.size() && text[i] == '.' && i + 1 < text.size() && is_ascii_digit(text[i + 1])) {
             size_t decimal_end = i + 1;
             while (decimal_end < text.size() && is_ascii_digit(text[decimal_end])) {
@@ -258,6 +289,9 @@ std::string normalize_chinese_numbers(const std::string & text) {
         }
         if (digits.size() == 4 && starts_with_at(text, i, "年")) {
             out += chinese_digits_individually(digits);
+        } else if (digits == "2" && std::any_of(std::begin(kMeasureWords), std::end(kMeasureWords),
+                                                [&](const char * word) { return starts_with_at(text, i, word); })) {
+            out += "两";
         } else {
             out += chinese_cardinal_from_digits(digits);
         }
@@ -346,6 +380,87 @@ std::string normalize_index_tts_chinese_text(std::string_view text) {
     return apply_index_tts_punctuation_map(std::move(out));
 }
 
+struct CodepointSpan {
+    size_t start = 0;
+    size_t end = 0;
+    std::string_view text;
+};
+
+std::vector<CodepointSpan> split_codepoints(std::string_view text, std::string_view label) {
+    std::vector<CodepointSpan> spans;
+    spans.reserve(engine::text::utf8_codepoint_count(text, label));
+    for (size_t pos = 0; pos < text.size();) {
+        const auto ch = static_cast<unsigned char>(text[pos]);
+        size_t width = 0;
+        if (ch <= 0x7FU) {
+            width = 1;
+        } else if ((ch & 0xE0U) == 0xC0U) {
+            width = 2;
+        } else if ((ch & 0xF0U) == 0xE0U) {
+            width = 3;
+        } else if ((ch & 0xF8U) == 0xF0U) {
+            width = 4;
+        } else {
+            throw std::runtime_error(std::string(label) + " contains invalid UTF-8");
+        }
+        spans.push_back({pos, pos + width, text.substr(pos, width)});
+        pos += width;
+    }
+    return spans;
+}
+
+std::string substring_codepoints(const std::string & text, const std::vector<CodepointSpan> & spans, size_t start, size_t end) {
+    if (start >= end) {
+        return {};
+    }
+    return text.substr(spans[start].start, spans[end - 1].end - spans[start].start);
+}
+
+bool is_ascii_non_space(std::string_view ch) noexcept {
+    return ch.size() == 1 && static_cast<unsigned char>(ch.front()) <= 0x7FU && ch.front() != ' ';
+}
+
+std::string remove_blank_between_chinese(const std::string & text) {
+    const auto spans = split_codepoints(text, "Confucius4-TTS text");
+    std::string out;
+    out.reserve(text.size());
+    for (size_t i = 0; i < spans.size(); ++i) {
+        if (spans[i].text == " " && i > 0 && i + 1 < spans.size()) {
+            if (is_ascii_non_space(spans[i - 1].text) && is_ascii_non_space(spans[i + 1].text)) {
+                out.push_back(' ');
+            }
+            continue;
+        }
+        out.append(spans[i].text);
+    }
+    return out;
+}
+
+std::string normalize_confucius4_chinese_text(std::string_view text) {
+    std::string out = remove_blank_between_chinese(std::string(text));
+    out = replace_all(std::move(out), "²", "平方");
+    out = replace_all(std::move(out), "³", "立方");
+    out = replace_all(std::move(out), ".", "。");
+    out = replace_all(std::move(out), " - ", "，");
+    out = replace_all(std::move(out), "（", "");
+    out = replace_all(std::move(out), "）", "");
+    out = replace_all(std::move(out), "【", "");
+    out = replace_all(std::move(out), "】", "");
+    out = replace_all(std::move(out), "`", "");
+    out = replace_all(std::move(out), "——", " ");
+
+    const auto spans = split_codepoints(out, "Confucius4-TTS Chinese text");
+    size_t trim_pos = spans.size();
+    while (trim_pos > 0 &&
+           (spans[trim_pos - 1].text == "，" || spans[trim_pos - 1].text == "," || spans[trim_pos - 1].text == "、")) {
+        --trim_pos;
+    }
+    if (trim_pos != spans.size()) {
+        return substring_codepoints(out, spans, 0, trim_pos) + "。";
+    }
+    return out;
+}
+
 }  // namespace
 
 ChineseTextNormalizer::ChineseTextNormalizer(ChineseTextNormalizationTarget target)
@@ -355,6 +470,8 @@ std::string ChineseTextNormalizer::normalize(std::string_view text) const {
     switch (target_) {
     case ChineseTextNormalizationTarget::IndexTTS:
         return normalize_index_tts_chinese_text(text);
+    case ChineseTextNormalizationTarget::Confucius4TTS:
+        return normalize_confucius4_chinese_text(text);
     }
     throw std::runtime_error("unsupported Chinese text normalization target");
 }

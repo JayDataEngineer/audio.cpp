@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include <unordered_map>
 
@@ -275,7 +276,9 @@ void VoxtralRealtimeSession::reset() {
     streaming_generation_ = VoxtralRealtimeGenerationOptions{};
     frontend_stream_state_ = VoxtralRealtimeFrontendStreamState{};
     audio_stream_state_ = audio_encoder_.make_stream_state();
-    streaming_token_ids_.clear();
+    streaming_text_.clear();
+    streaming_published_bytes_ = 0;
+    streaming_token_count_ = 0;
     previous_stream_token_ = 0;
     first_stream_chunk_ = true;
     have_previous_stream_token_ = false;
@@ -322,21 +325,22 @@ runtime::TaskResult VoxtralRealtimeSession::finalize() {
     if (streaming_audio_offset_values_ > streaming_audio_.samples.size()) {
         throw std::runtime_error("VoxTral streaming pending audio offset is out of range");
     }
-    if (streaming_audio_offset_values_ == streaming_audio_.samples.size() && streaming_token_ids_.empty()) {
+    if (streaming_audio_offset_values_ == streaming_audio_.samples.size() && streaming_token_count_ == 0) {
         throw std::runtime_error("VoxTral realtime finalize() requires streamed audio");
     }
-    auto event = process_available_stream_chunks();
-    (void) event;
+    // Any partial this last pass produces has already gone to the sink.
+    (void) process_available_stream_chunks();
     streaming_result_ = runtime::TaskResult{};
-    streaming_result_.text_output = runtime::Transcript{tokenizer_.decode(streaming_token_ids_), ""};
+    streaming_result_.text_output = runtime::Transcript{streaming_text_, ""};
     stream_started_ = false;
-    if (stream_event_sink_ != nullptr && streaming_result_.text_output.has_value()) {
+    if (stream_event_sink_ != nullptr) {
+        // Every token has already been delivered as a partial, so the final event only marks the
+        // end of the stream. The whole transcript remains available as result.text_output.
         runtime::StreamEvent event;
-        event.partial_text = streaming_result_.text_output;
         event.is_final = true;
         stream_event_sink_(event);
     }
-    engine::debug::timing_log_scalar("voxtral_realtime.session.stream.tokens", streaming_token_ids_.size());
+    engine::debug::timing_log_scalar("voxtral_realtime.session.stream.tokens", streaming_token_count_);
     engine::debug::timing_log_scalar("voxtral_realtime.session.stream.steps_processed", streaming_steps_processed_);
     engine::debug::timing_log_scalar("voxtral_realtime.session.stream.frontend_ms", stream_frontend_ms_);
     engine::debug::timing_log_scalar("voxtral_realtime.session.stream.encoder_ms", stream_encoder_ms_);
@@ -453,31 +457,29 @@ runtime::StreamEvent VoxtralRealtimeSession::process_one_stream_chunk(const runt
     const auto decoder_start = Clock::now();
     if (first_stream_chunk_) {
         auto prompt = tokenizer_.build_transcription_prompt(frontend_.first_stream_chunk_samples(), true);
-        const int32_t token = text_decoder_.begin_stream(prompt, audio_embeddings, streaming_generation_);
+        record_stream_token(text_decoder_.begin_stream(prompt, audio_embeddings, streaming_generation_));
         first_stream_chunk_ = false;
-        stream_decoder_ms_ += engine::debug::elapsed_ms(decoder_start);
-        record_stream_token(token, event);
-        return event;
-    }
-    if (!have_previous_stream_token_) {
+    } else if (!have_previous_stream_token_) {
         throw std::runtime_error("VoxTral streaming decoder is missing previous token");
-    }
-    // One encoder forward covers `stream_batch_tokens_` audio tokens; the decoder still runs one
-    // step per token, each consuming its own row of the batch.
-    for (int64_t row = 0; row < audio_embeddings.tokens; ++row) {
-        const int32_t token = text_decoder_.stream_step(
-            previous_stream_token_,
-            audio_embeddings,
-            row,
-            assets_->config.default_num_delay_tokens,
-            streaming_generation_);
-        record_stream_token(token, event);
+    } else {
+        // One encoder forward covers `stream_batch_tokens_` audio tokens; the decoder still runs one
+        // step per token, each consuming its own row of the batch.
+        for (int64_t row = 0; row < audio_embeddings.tokens; ++row) {
+            record_stream_token(text_decoder_.stream_step(
+                previous_stream_token_,
+                audio_embeddings,
+                row,
+                assets_->config.default_num_delay_tokens,
+                streaming_generation_));
+        }
     }
     stream_decoder_ms_ += engine::debug::elapsed_ms(decoder_start);
+    // Once a chunk, not once a token: the chunk reports a single event however many it decoded.
+    take_stream_delta(event);
     return event;
 }
 
-void VoxtralRealtimeSession::record_stream_token(int32_t token, runtime::StreamEvent & event) {
+void VoxtralRealtimeSession::record_stream_token(int32_t token) {
     previous_stream_token_ = token;
     have_previous_stream_token_ = true;
     // The reference implementation gives EOS no special treatment: whatever token was sampled
@@ -486,8 +488,21 @@ void VoxtralRealtimeSession::record_stream_token(int32_t token, runtime::StreamE
     if (!tokenizer_.is_stream_text_token(token)) {
         return;
     }
-    streaming_token_ids_.push_back(token);
-    event.partial_text = runtime::Transcript{tokenizer_.decode(streaming_token_ids_), ""};
+    ++streaming_token_count_;
+    // Tekken decode concatenates each id's bytes, so decoding token by token builds the same
+    // transcript as decoding the list, at an amortized O(1) append instead of a fresh decode.
+    streaming_text_ += tokenizer_.decode({token});
+}
+
+void VoxtralRealtimeSession::take_stream_delta(runtime::StreamEvent & event) {
+    // Partials carry only the text decoded since the last one, as the other streaming ASR sessions
+    // already emit. Restating the transcript is quadratic in its length and hands a consumer of
+    // transcript.text.delta text it was already given.
+    if (streaming_published_bytes_ >= streaming_text_.size()) {
+        return;
+    }
+    event.partial_text = runtime::Transcript{streaming_text_.substr(streaming_published_bytes_), ""};
+    streaming_published_bytes_ = streaming_text_.size();
 }
 
 }  // namespace engine::models::voxtral_realtime

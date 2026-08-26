@@ -1,5 +1,142 @@
 {
   "family": "index_tts2",
+  "display_name": "IndexTTS2",
+  "description": "Zero-shot TTS system with voice cloning, emotion-speaker decoupling, text or audio emotion control, and explicit duration control. Variant v2 covers Chinese and English; variant v2.5 (config version 2.5) adds multilingual tiktoken tokenization with Japanese, Spanish and Arabic support.",
+  "category": "tts",
+  "status": "supported",
+  "tasks": [
+    "tts",
+    "clone"
+  ],
+  "modes": [
+    "offline"
+  ],
+  "languages": [
+    "zh",
+    "en",
+    "ja",
+    "es",
+    "ar"
+  ],
+  "capabilities": {
+    "tts": [
+      "emotion_control"
+    ],
+    "clone": [
+      "speaker_reference",
+      "emotion_control"
+    ]
+  },
+  "runtime": {
+    "tags": [
+      "gguf"
+    ]
+  },
+  "ui": {
+    "recommended_package": "index_tts2_q8_0",
+    "tags": [
+      "TTS",
+      "Clone",
+      "GGUF"
+    ],
+    "docs": [
+      "docs/tts.md",
+      "docs/gguf.md"
+    ]
+  },
+  "package_defaults": {
+    "download": {
+      "kind": "huggingface_snapshot",
+      "repo": "audio-cpp/audio.cpp-gguf",
+      "revision": "main",
+      "gated": false
+    }
+  },
+  "packages": [
+    {
+      "id": "index_tts2_q8_0",
+      "display_name": "IndexTTS2 Q8_0 GGUF",
+      "default": true,
+      "format": "gguf",
+      "precision": "q8_0",
+      "target_directory": "IndexTTS2-GGUF",
+      "files": [
+        "IndexTTS2-GGUF/index-tts2-q8_0.gguf"
+      ],
+      "strip_prefix": "IndexTTS2-GGUF"
+    },
+    {
+      "id": "index_tts2_f16",
+      "display_name": "IndexTTS2 F16 GGUF",
+      "format": "gguf",
+      "precision": "f16",
+      "target_directory": "IndexTTS2-GGUF",
+      "files": [
+        "IndexTTS2-GGUF/index-tts2-f16.gguf"
+      ],
+      "strip_prefix": "IndexTTS2-GGUF"
+    },
+    {
+      "id": "index_tts2_orig",
+      "display_name": "IndexTTS2 Original-Dtype GGUF",
+      "format": "gguf",
+      "precision": "orig",
+      "target_directory": "IndexTTS2-GGUF",
+      "files": [
+        "IndexTTS2-GGUF/index-tts2-orig.gguf"
+      ],
+      "strip_prefix": "IndexTTS2-GGUF"
+    },
+    {
+      "id": "index_tts2_safetensors",
+      "display_name": "IndexTTS2 Safetensors",
+      "format": "safetensors",
+      "precision": "native",
+      "target_directory": "IndexTTS-2",
+      "files": [
+        "config.yaml",
+        "bpe.model",
+        "gpt.safetensors"
+      ],
+      "download": {
+        "kind": "huggingface_snapshot",
+        "repo": "mlx-community/index-tts2-mlx"
+      }
+    },
+    {
+      "id": "index_tts2_5_q8_0",
+      "display_name": "IndexTTS2.5 Q8_0 GGUF",
+      "format": "gguf",
+      "precision": "q8_0",
+      "target_directory": "IndexTTS2.5-GGUF",
+      "files": [
+        "IndexTTS2.5-GGUF/index-tts2_5-q8_0.gguf"
+      ],
+      "strip_prefix": "IndexTTS2.5-GGUF"
+    },
+    {
+      "id": "index_tts2_5_f16",
+      "display_name": "IndexTTS2.5 F16 GGUF",
+      "format": "gguf",
+      "precision": "f16",
+      "target_directory": "IndexTTS2.5-GGUF",
+      "files": [
+        "IndexTTS2.5-GGUF/index-tts2_5-f16.gguf"
+      ],
+      "strip_prefix": "IndexTTS2.5-GGUF"
+    },
+    {
+      "id": "index_tts2_5_orig",
+      "display_name": "IndexTTS2.5 Original-Dtype GGUF",
+      "format": "gguf",
+      "precision": "orig",
+      "target_directory": "IndexTTS2.5-GGUF",
+      "files": [
+        "IndexTTS2.5-GGUF/index-tts2_5-orig.gguf"
+      ],
+      "strip_prefix": "IndexTTS2.5-GGUF"
+    }
+  ],
   "sources": [
     {
       "format": "gguf",
@@ -9,7 +146,6 @@
       },
       "files": {
         "config": "model:config.yaml",
-        "bpe": "model:bpe.model",
         "wav2vec2bert_config": "model:w2v-bert-2.0/config.json",
         "wav2vec2bert_preprocessor_config": "model:w2v-bert-2.0/preprocessor_config.json",
         "bigvgan_config": "model:bigvgan/config.json",
@@ -19,6 +155,10 @@
         "qwen_emotion_tokenizer_config": "model:qwen0.6bemo4-merge/tokenizer_config.json",
         "qwen_emotion_vocab": "model:qwen0.6bemo4-merge/vocab.json",
         "qwen_emotion_merges": "model:qwen0.6bemo4-merge/merges.txt"
+      },
+      "optional_files": {
+        "bpe": "model:bpe.model",
+        "tiktoken": "model:multilingual_zh_ja_yue_char_del.tiktoken"
       },
       "tensors": {
         "gpt": {
@@ -70,7 +210,6 @@
       },
       "files": {
         "config": "model:config.yaml",
-        "bpe": "model:bpe.model",
         "wav2vec2bert_config": "model:w2v-bert-2.0/config.json",
         "wav2vec2bert_preprocessor_config": "model:w2v-bert-2.0/preprocessor_config.json",
         "bigvgan_config": "model:bigvgan/config.json",
@@ -80,6 +219,10 @@
         "qwen_emotion_tokenizer_config": "model:qwen0.6bemo4-merge/tokenizer_config.json",
         "qwen_emotion_vocab": "model:qwen0.6bemo4-merge/vocab.json",
         "qwen_emotion_merges": "model:qwen0.6bemo4-merge/merges.txt"
+      },
+      "optional_files": {
+        "bpe": "model:bpe.model",
+        "tiktoken": "model:multilingual_zh_ja_yue_char_del.tiktoken"
       },
       "tensors": {
         "gpt": "model:gpt.safetensors",

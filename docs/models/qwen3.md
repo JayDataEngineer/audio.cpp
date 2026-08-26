@@ -91,7 +91,7 @@ These sampling controls are shared by the Qwen3 TTS Base, VoiceDesign, and Custo
 | `--top-k` | integer | `50` | Main talker top-k. |
 | `--top-p` | float | `1.0` | Main talker top-p. |
 | `--repetition-penalty` | float | `1.05` | Main talker repetition penalty. |
-| `--request-option subtalker_do_sample=true|false` | bool | `true` | Subtalker sampling. |
+| `--request-option subtalker_do_sample=true\|false` | bool | `true` | Subtalker sampling. |
 | `--request-option subtalker_temperature=<float>` | float | `0.9` | Subtalker temperature. |
 | `--request-option subtalker_top_k=<n>` | integer | `50` | Subtalker top-k. |
 | `--request-option subtalker_top_p=<float>` | float | `1.0` | Subtalker top-p. |
@@ -105,6 +105,10 @@ the forced aligner model path. Long audio is split inside the model session
 before ASR inference; word timestamps are shifted back onto the original audio
 timeline.
 
+Streaming mode accepts live audio chunks and emits buffered transcript deltas.
+Timestamp output remains offline-only because word alignment runs after the full
+transcript is known.
+
 `audio_chunk_mode=auto` is the default. For transcript-only ASR, Qwen3 ASR uses
 fixed chunks. When word timestamps are requested, it uses bundled Silero VAD
 internally to choose speech-aware chunks before running ASR and alignment.
@@ -114,12 +118,16 @@ internally to choose speech-aware chunks before running ASR and alignment.
 | Family | `qwen3_asr` |
 | Model directory | `models/Qwen3-ASR-0.6B` or `models/Qwen3-ASR-1.7B-hf` |
 | Task | `asr` |
-| Modes | `offline` |
+| Modes | `offline`, `streaming` |
 | Input | Speech WAV through `--audio` |
 | Output | Text to stdout or `--text-out`; optional word JSON through `--words-out` with a forced aligner |
 
 ```bash
 audiocpp_cli --task asr --family qwen3_asr --model models/Qwen3-ASR-0.6B --backend cuda --audio speech_16k.wav --text "" --text-out transcript.txt
+```
+
+```bash
+audiocpp_cli --task asr --mode streaming --family qwen3_asr --model models/Qwen3-ASR-0.6B --backend cuda --audio speech_16k.wav --text "" --request-option audio_chunk_seconds=5 --text-out transcript.txt
 ```
 
 The native Hugging Face Transformers layout of `Qwen/Qwen3-ASR-1.7B-hf` is
@@ -236,7 +244,7 @@ audiocpp_cli --task align --family qwen3_forced_aligner --model models/Qwen3-For
 
 | Option | Values | Default | Meaning |
 |---|---|---:|---|
-| `--session-option qwen3_tts.mem_saver=true|false` | bool | `false` | Release the TTS talker cached-step graph after each request to reduce post-request resident VRAM. Later requests rebuild that graph; voice prompt, prefill, code predictor, and speech decoder caches stay reusable. |
+| `--session-option qwen3_tts.mem_saver=true\|false` | bool | `false` | Release the TTS talker cached-step graph after each request to reduce post-request resident VRAM. Later requests rebuild that graph; voice prompt, prefill, code predictor, and speech decoder caches stay reusable. |
 | `--session-option qwen3_tts.voice_prompt_cache_slots=<n>` | integer | `1` | Voice-clone prompt cache slots. Set to `0` to disable prompt caching. |
 | `--session-option qwen3_tts.weight_type=<type>` | `native`, `f32`, `f16`, `bf16`, `q8_0` | `native` | TTS graph weight type. |
 | `--session-option qwen3_asr.weight_type=<type>` | `native`, `f32`, `f16`, `bf16`, `q8_0` | `native` | ASR thinker weight type. |
