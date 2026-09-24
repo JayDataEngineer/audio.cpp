@@ -369,11 +369,17 @@ Qwen3TTSSession::Qwen3TTSSession(
         // encoder extracts an identity vector from reference audio, which replaces
         // the preset speaker token in the codec prefix (scaled to match norms).
         // Reference: gabriele-mastrapasqua/qwen3-tts qwen_tts.c lines 1025-1048, 1182-1209.
-        speaker_encoder_ = std::make_unique<Qwen3SpeakerEncoderRuntime>(
-            assets_,
-            voice_prompt_context_,
-            speaker_encoder_graph_arena_bytes_,
-            conv_weight_storage_type_);
+        // Encoderless checkpoints (upstream 1.7B CustomVoice ships no ECAPA
+        // weights): perform-from-a-saved-voice needs no encoder, so the session
+        // constructs without it; clone-from-raw-audio refuses loud at the
+        // injection site below — never a silent identity drop.
+        if (assets_->config.has_speaker_encoder) {
+            speaker_encoder_ = std::make_unique<Qwen3SpeakerEncoderRuntime>(
+                assets_,
+                voice_prompt_context_,
+                speaker_encoder_graph_arena_bytes_,
+                conv_weight_storage_type_);
+        }
     }
 }
 
@@ -455,7 +461,16 @@ runtime::TaskResult Qwen3TTSSession::run(const runtime::TaskRequest & request) {
             // The talker will scale it and replace the preset speaker token in the
             // codec prefix, enabling custom voice identity on the instruct model.
             // Reference: gabriele-mastrapasqua/qwen3-tts qwen_tts.c lines 1182-1209.
-            if (qwen_request.voice_clone.has_value() && speaker_encoder_ != nullptr) {
+            if (qwen_request.voice_clone.has_value()) {
+                if (speaker_encoder_ == nullptr) {
+                    // No silent identity drop: reference audio on an
+                    // encoderless checkpoint must refuse loud. Perform from
+                    // a saved .qvoice embedding instead.
+                    throw std::runtime_error(
+                        "Qwen3 custom voice checkpoint ships no speaker "
+                        "encoder — clone from reference audio is "
+                        "unavailable; load a saved .qvoice instead");
+                }
                 const auto prompt_start = Clock::now();
                 prefill.speaker_embedding = speaker_encoder_->encode(
                     qwen_request.voice_clone->reference_audio);
