@@ -365,21 +365,18 @@ Qwen3TTSSession::Qwen3TTSSession(
             speaker_encoder_graph_arena_bytes_,
             conv_weight_storage_type_);
     } else if (assets_->config.variant == Qwen3TTSVariant::CustomVoice) {
-        // CustomVoice supports voice embedding injection: the ECAPA-TDNN speaker
-        // encoder extracts an identity vector from reference audio, which replaces
-        // the preset speaker token in the codec prefix (scaled to match norms).
-        // Reference: gabriele-mastrapasqua/qwen3-tts qwen_tts.c lines 1025-1048, 1182-1209.
-        // Encoderless checkpoints (upstream 1.7B CustomVoice ships no ECAPA
-        // weights): perform-from-a-saved-voice needs no encoder, so the session
-        // constructs without it; clone-from-raw-audio refuses loud at the
-        // injection site below — never a silent identity drop.
-        if (assets_->config.has_speaker_encoder) {
-            speaker_encoder_ = std::make_unique<Qwen3SpeakerEncoderRuntime>(
-                assets_,
-                voice_prompt_context_,
-                speaker_encoder_graph_arena_bytes_,
-                conv_weight_storage_type_);
-        }
+        // CustomVoice is PRESETS-ONLY by architecture (operator correction
+        // 2026-09-24): the 9 speaker identities are static learned token
+        // rows in talker.model.codec_embedding — upstream hard-sets
+        // speaker_encoder = None for every non-base tts_model_type and
+        // raises on clone attempts. The speaker_encoder.* tensors +
+        // config some 0.6B-CustomVoice checkpoints carry are ORPHAN
+        // artifacts of the sft copytree export bug — dormant, ignored by
+        // the architecture. This fork constructs no encoder on the
+        // CustomVoice lane; reference audio reaching a CustomVoice session
+        // refuses loud at the injection site below (upstream ValueError
+        // parity). Voice cloning and .qvoice performs belong to the Base
+        // lane and the estate's VoiceStudio torch path respectively.
     }
 }
 
@@ -467,9 +464,10 @@ runtime::TaskResult Qwen3TTSSession::run(const runtime::TaskRequest & request) {
                     // encoderless checkpoint must refuse loud. Perform from
                     // a saved .qvoice embedding instead.
                     throw std::runtime_error(
-                        "Qwen3 custom voice checkpoint ships no speaker "
-                        "encoder — clone from reference audio is "
-                        "unavailable; load a saved .qvoice instead");
+                        "Qwen3 custom voice is presets-only — clone from "
+                        "reference audio belongs to the Base lane (upstream "
+                        "raises the same way); perform a saved .qvoice via "
+                        "the Base lane or VoiceStudio");
                 }
                 const auto prompt_start = Clock::now();
                 prefill.speaker_embedding = speaker_encoder_->encode(
