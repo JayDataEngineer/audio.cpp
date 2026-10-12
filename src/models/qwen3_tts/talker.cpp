@@ -468,6 +468,13 @@ PromptEmbeddingState build_prompt_state(
 
             custom_voice_speaker_embed.reserve(spk_vals.size());
             for (const auto v : spk_vals) custom_voice_speaker_embed.push_back(v * spk_scale);
+        } else if (prefill.speaker.empty()) {
+            // PROMPT-ONLY custom voice (operator ruling 2026-10-12,
+            // upstream parity modeling_qwen3_tts.py:2088-2089:
+            // `if speaker == "" or speaker == None: speaker_embed = None
+            // # Instruct create speaker`). No speaker row is appended —
+            // append_rows below no-ops on the empty vector and the model
+            // creates the voice from the prompt alone.
         } else {
             const std::string speaker = ascii_lower(prefill.speaker);
             const auto speaker_it = config.speaker_id.find(speaker);

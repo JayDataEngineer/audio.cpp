@@ -31,11 +31,14 @@ Qwen3TalkerPrefill Qwen3TTSCustomVoicePromptBuilder::build_prefill(const Qwen3TT
     if (!request.custom_voice.has_value()) {
         throw std::runtime_error("Qwen3 custom voice prefill requires custom voice input");
     }
-    // Speaker name is optional when a voice embedding (reference audio) is provided.
-    // The talker uses the scaled ECAPA embedding to replace the speaker token.
-    if (request.custom_voice->speaker.empty() && !request.voice_clone.has_value()) {
-        throw std::runtime_error("Qwen3 custom voice prefill requires speaker or voice reference");
-    }
+    // Speaker name is optional — PERIOD (operator ruling 2026-10-12,
+    // upstream parity modeling_qwen3_tts.py:2088: `if speaker == "" or
+    // speaker == None: speaker_embed = None  # Instruct create speaker`).
+    // A speakerless, referenceless request is PROMPT-ONLY: the prefill
+    // builds with no speaker row and the model creates the voice. The
+    // old throw here invented a requirement the upstream model does not
+    // have ("requires speaker or voice reference" — lane injury
+    // run-d5f94f216419).
     Qwen3TalkerPrefill prefill;
     prefill.prompt_mode = Qwen3TalkerPromptMode::CustomVoice;
     prefill.input_ids = tokenizer_.encode(tokenizer_.build_assistant_prompt(request.text));
